@@ -3,7 +3,8 @@ from flask import Flask, render_template, request, jsonify, flash
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
 from youtube_utils import get_video_info, extract_video_id
-from llm_utils import summarize_text, answer_question, model_lock
+from llm_utils import summarize_text, answer_question
+from flask_wtf.csrf import CSRFProtect
 
 class Base(DeclarativeBase):
     pass
@@ -12,9 +13,10 @@ db = SQLAlchemy(model_class=Base)
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev_key_123"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///youtube_summary.db"
+csrf = CSRFProtect(app)
 db.init_app(app)
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
     return render_template('index.html')
 
@@ -31,13 +33,14 @@ def summarize():
         return render_template('index.html')
 
     try:
-        if not model_lock.acquire(blocking=False):
-            flash('モデルを読み込み中です。しばらくお待ちください。', 'warning')
-            return render_template('index.html')
-        model_lock.release()
-        
         video_info = get_video_info(video_id)
         summary = summarize_text(video_info['transcript'])
+        
+        from models import Summary
+        new_summary = Summary(video_id=video_id, summary=summary)
+        db.session.add(new_summary)
+        db.session.commit()
+        
         return render_template('result.html', 
                              video=video_info,
                              summary=summary)
@@ -50,17 +53,32 @@ def ask():
     question = request.form.get('question')
     video_id = request.form.get('video_id')
     
+    if not question or not video_id:
+        return jsonify({'error': '質問とビデオIDが必要です'}), 400
+    
     try:
-        if not model_lock.acquire(blocking=False):
-            return jsonify({'error': 'モデルを読み込み中です。しばらくお待ちください。'}), 503
-        model_lock.release()
-        
         video_info = get_video_info(video_id)
         answer = answer_question(question, video_info['transcript'])
+        
+        from models import Question
+        new_question = Question(video_id=video_id, question=question, answer=answer)
+        db.session.add(new_question)
+        db.session.commit()
+        
         return jsonify({'answer': answer})
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
+@app.errorhandler(405)
+def method_not_allowed(e):
+    if request.path == '/summarize':
+        flash('無効なリクエストメソッドです。フォームから送信してください。', 'error')
+        return render_template('index.html'), 405
+    return jsonify({'error': '無効なリクエストメソッドです'}), 405
+
 with app.app_context():
     import models
     db.create_all()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)

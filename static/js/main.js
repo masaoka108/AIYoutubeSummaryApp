@@ -3,6 +3,7 @@ async function askQuestion() {
     const videoId = document.getElementById('video-id').value;
     const answerSection = document.getElementById('answer-section');
     const answerText = document.getElementById('answer-text');
+    const csrf_token = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
 
     if (!question.trim()) {
         alert('質問を入力してください');
@@ -18,6 +19,7 @@ async function askQuestion() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': csrf_token
             },
             body: new URLSearchParams({
                 'question': question,
@@ -25,15 +27,19 @@ async function askQuestion() {
             })
         });
 
-        const data = await response.json();
-        
-        if (response.ok) {
-            answerText.textContent = data.answer;
-        } else {
-            throw new Error(data.error || '回答の生成に失敗しました');
+        if (!response.ok) {
+            if (response.status === 405) {
+                throw new Error('無効なリクエストメソッドです');
+            }
+            const errorData = await response.json();
+            throw new Error(errorData.error || '回答の生成に失敗しました');
         }
+
+        const data = await response.json();
+        answerText.textContent = data.answer;
     } catch (error) {
         answerText.textContent = `エラー: ${error.message}`;
+        answerText.classList.add('text-danger');
     }
 }
 

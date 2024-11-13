@@ -8,35 +8,35 @@ from transformers import MBartForConditionalGeneration, MBartTokenizer, pipeline
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variables for lazy loading
+# Global variables for models
 summarizer = None
 qa_model = None
-model_lock = threading.Lock()
 
 def load_models():
-    """Load models with improved Japanese support"""
+    """Load models with basic summarization support"""
     global summarizer, qa_model
-    with model_lock:
-        if summarizer is None:
-            logger.info("Loading Japanese-aware summarization model...")
-            model_name = "facebook/mbart-large-cc25"
-            model = MBartForConditionalGeneration.from_pretrained(model_name)
-            tokenizer = MBartTokenizer.from_pretrained(model_name)
-            tokenizer.src_lang = "ja_XX"
-            summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
-            
-        if qa_model is None:
-            logger.info("Loading QA model...")
-            qa_model = pipeline("question-answering", model="bert-large-uncased-whole-word-masking-finetuned-squad")
+    try:
+        logger.info("Loading summarization model...")
+        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+        
+        logger.info("Loading QA model...")
+        qa_model = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+        
+        logger.info("Models loaded successfully")
+    except Exception as e:
+        logger.error(f"Error loading models: {str(e)}")
+        raise
 
 def get_summarizer():
     """Get or initialize summarizer"""
+    global summarizer
     if summarizer is None:
         load_models()
     return summarizer
 
 def get_qa_model():
     """Get or initialize QA model"""
+    global qa_model
     if qa_model is None:
         load_models()
     return qa_model
@@ -333,5 +333,5 @@ def answer_question(question, context):
         logger.error(f"Question answering failed: {str(e)}")
         raise Exception(f"質問応答に失敗しました: {str(e)}")
 
-# Start loading models in background
-threading.Thread(target=load_models, daemon=True).start()
+# Initialize models
+load_models()

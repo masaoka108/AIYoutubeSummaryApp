@@ -17,4 +17,5 @@ dependencies = [
     "fugashi",
     "unidic-lite",
     "langdetect",
+    "flask-wtf>=1.2.2",
 ]
