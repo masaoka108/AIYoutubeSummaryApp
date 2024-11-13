@@ -65,27 +65,63 @@ def clean_text(text):
     text = ' '.join(text.split())
     return text
 
-def split_into_sentences(text):
-    """Split text into sentences with proper boundary detection"""
-    # Pattern for sentence boundaries including multiple spaces
-    pattern = r'([。．.!?！？\n]|\s{2,})'
+def get_shortest_valid_sentence(text):
+    """Get the shortest valid sentence from text"""
+    if not text:
+        return None
+    
+    # Pattern for Japanese and English sentence boundaries
+    pattern = r'([。．.!?！？\n])'
     sentences = []
     
     # Split and combine sentences with their punctuation
     parts = re.split(pattern, text)
-    
     i = 0
     while i < len(parts):
         current = parts[i].strip()
-        # Get punctuation/boundary if available
         boundary = parts[i + 1] if i + 1 < len(parts) else ""
-        
-        if current or boundary:  # Only add non-empty sentences
+        if current or boundary:
             sentences.append(current + boundary)
-        
-        i += 2  # Skip the boundary in next iteration
+        i += 2
     
-    return [s for s in sentences if s.strip()]  # Filter out empty sentences
+    # Filter valid sentences and find shortest
+    valid_sentences = [s for s in sentences if s.strip()]
+    if not valid_sentences:
+        return text  # Return original text if no valid sentences found
+    
+    return min(valid_sentences, key=len)
+
+def split_into_sentences(text):
+    """Split text into sentences with improved Japanese support"""
+    if not text:
+        return [text]  # Return original text if empty
+    
+    # Pattern for Japanese and English sentence boundaries
+    pattern = r'([。．.!?！？\n])'
+    sentences = []
+    
+    try:
+        # Split and combine sentences with their punctuation
+        parts = re.split(pattern, text)
+        i = 0
+        while i < len(parts):
+            current = parts[i].strip()
+            boundary = parts[i + 1] if i + 1 < len(parts) else ""
+            if current or boundary:
+                sentences.append(current + boundary)
+            i += 2
+        
+        # Filter out empty sentences
+        valid_sentences = [s for s in sentences if s.strip()]
+        
+        if not valid_sentences:
+            return [text]  # Return original text if no valid sentences found
+        
+        return valid_sentences
+        
+    except Exception as e:
+        logger.warning(f"Failed to split text into sentences: {str(e)}")
+        return [text]  # Return original text if splitting fails
 
 def create_chunks(text, initial_chunk_size=512, min_chunk_size=50):
     """Create properly sized chunks of text with improved Japanese support"""
@@ -107,6 +143,10 @@ def create_chunks(text, initial_chunk_size=512, min_chunk_size=50):
     
     # Split text into sentences
     sentences = split_into_sentences(text)
+    if not sentences:
+        logger.warning("No valid sentences found, returning original text as single chunk")
+        return [text]
+    
     logger.info(f"Split text into {len(sentences)} sentences")
     
     chunks = []
@@ -122,67 +162,61 @@ def create_chunks(text, initial_chunk_size=512, min_chunk_size=50):
             chunk_text = ''.join(current_chunk)
             chunk_length = get_text_length(chunk_text)
             logger.info(f"Created chunk with length {chunk_length}")
-            if chunk_length >= min_chunk_size:
-                chunks.append(chunk_text)
+            chunks.append(chunk_text)
             current_chunk = [sentence]
             current_length = sentence_length
         else:
             current_chunk.append(sentence)
             current_length += sentence_length
     
-    # Add the last chunk if it meets minimum size
+    # Add the last chunk
     if current_chunk:
         chunk_text = ''.join(current_chunk)
-        chunk_length = get_text_length(chunk_text)
-        if chunk_length >= min_chunk_size:
-            logger.info(f"Created final chunk with length {chunk_length}")
-            chunks.append(chunk_text)
+        chunks.append(chunk_text)
+        logger.info(f"Added final chunk with length {get_text_length(chunk_text)}")
     
-    # Validate chunks
+    # Ensure we have at least one chunk
     if not chunks:
-        raise ValueError("テキストを適切なチャンクに分割できませんでした")
+        logger.warning("No chunks created, using original text")
+        return [text]
     
-    logger.info(f"Created {len(chunks)} chunks")
     return chunks
 
-def validate_chunk(chunk, index, total_chunks):
-    """Validate chunk before processing"""
-    if not chunk or not chunk.strip():
-        raise ValueError(f"チャンク {index + 1}/{total_chunks} が空です")
-    
-    chunk_length = get_text_length(chunk)
-    logger.info(f"Validating chunk {index + 1}/{total_chunks} (length: {chunk_length})")
-    
-    if chunk_length < 10:  # Minimum viable chunk size
-        raise ValueError(f"チャンク {index + 1}/{total_chunks} が短すぎます")
-    
-    # Log first few characters for debugging
-    preview = chunk[:50] + "..." if len(chunk) > 50 else chunk
-    logger.debug(f"Chunk {index + 1} preview: {preview}")
-    
-    return True
-
 def truncate_to_size(text, target_size):
-    """Truncate text to target size while respecting sentence boundaries"""
+    """Truncate text to target size while preserving sentence boundaries"""
     if not text:
         return text
-        
+    
+    # If text is already within target size, return as is
+    if get_text_length(text) <= target_size:
+        return text
+    
     sentences = split_into_sentences(text)
     result = []
     current_length = 0
     
+    # Try to build chunk within target size
     for sentence in sentences:
         sentence_length = get_text_length(sentence)
-        if current_length + sentence_length > target_size:
+        if current_length + sentence_length <= target_size:
+            result.append(sentence)
+            current_length += sentence_length
+        else:
             break
-        result.append(sentence)
-        current_length += sentence_length
     
-    truncated = ''.join(result)
-    if not truncated:
-        raise ValueError("テキストを適切なサイズに調整できませんでした")
+    # If we found valid sentences within target size
+    if result:
+        return ''.join(result)
     
-    return truncated
+    # Fallback: Get shortest valid sentence if no complete chunk fits
+    shortest_sentence = get_shortest_valid_sentence(text)
+    if shortest_sentence:
+        logger.info("Using shortest valid sentence as fallback")
+        return shortest_sentence
+    
+    # Final fallback: Return truncated original text
+    logger.warning("No valid sentences found, truncating original text")
+    return text[:target_size]
 
 def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_length):
     """Summarize a single chunk with improved error handling"""
@@ -200,32 +234,40 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_lengt
             
             if current_length > chunk_size:
                 logger.info(f"Truncating chunk {index + 1} to size {chunk_size}")
-                try:
-                    chunk = truncate_to_size(chunk, chunk_size)
-                    current_length = get_text_length(chunk)
-                    logger.info(f"Truncated chunk length: {current_length}")
-                except ValueError as e:
-                    logger.warning(f"Failed to truncate chunk: {str(e)}")
+                truncated_chunk = truncate_to_size(chunk, chunk_size)
+                if not truncated_chunk:
+                    logger.warning(f"Failed to truncate chunk {index + 1}")
                     continue
+                    
+                chunk = truncated_chunk
+                current_length = get_text_length(chunk)
+                logger.info(f"Truncated chunk length: {current_length}")
             
-            # Validate chunk after truncation
-            validate_chunk(chunk, index, total_chunks)
+            # Validate chunk content
+            if not chunk.strip():
+                logger.warning(f"Chunk {index + 1} is empty after truncation")
+                continue
             
             # Attempt summarization
             logger.info(f"Attempting summarization with size {chunk_size}")
             summary = model(chunk, max_length=max_length, min_length=min_length, do_sample=False)
             
-            if not summary or not isinstance(summary, list) or len(summary) == 0:
-                raise ValueError(f"チャンク {index + 1} の要約結果が無効です")
+            if summary and isinstance(summary, list) and len(summary) > 0:
+                summary_text = summary[0].get('summary_text')
+                if summary_text:
+                    logger.info(f"Successfully summarized chunk {index + 1}/{total_chunks}")
+                    return summary_text
             
-            logger.info(f"Successfully summarized chunk {index + 1}/{total_chunks}")
-            return summary[0]['summary_text']
+            logger.warning(f"Invalid summary result for chunk {index + 1}")
+            continue
             
         except Exception as e:
             logger.warning(f"Failed to summarize chunk {index + 1} with size {chunk_size}: {str(e)}")
             if chunk_size == chunk_sizes[-1]:  # If this was the smallest chunk size
                 raise ValueError(f"チャンク {index + 1} の要約に失敗しました: {str(e)}")
             continue
+    
+    raise ValueError(f"チャンク {index + 1} の要約に失敗しました")
 
 def summarize_text(text, max_length=130, min_length=30):
     """Summarize the given text with improved Japanese support"""
@@ -244,10 +286,14 @@ def summarize_text(text, max_length=130, min_length=30):
         for i, chunk in enumerate(chunks):
             try:
                 summary = summarize_chunk_with_retry(chunk, i, len(chunks), max_length, min_length)
-                summaries.append(summary)
+                if summary:
+                    summaries.append(summary)
             except Exception as e:
                 logger.error(f"Failed to summarize chunk {i + 1}: {str(e)}")
                 raise
+        
+        if not summaries:
+            raise ValueError("要約を生成できませんでした")
         
         final_summary = ' '.join(summaries)
         logger.info("Summarization completed successfully")
