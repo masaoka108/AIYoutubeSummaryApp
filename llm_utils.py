@@ -100,52 +100,13 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def split_into_sentences(text):
-    """Split text into sentences with improved Japanese boundary detection"""
-    if not text:
-        return []
-
-    # Enhanced pattern for Japanese text boundaries
-    pattern = r'([。．.!?！？]|\n|(?<=」)(?![\s。．.!?！？])|(?<=）)(?![\s。．.!?！？])|(?<=、)\s+(?=[^、。．.!?！？]*[。．.!?！？]))'
-    
-    try:
-        parts = re.split(pattern, text)
-        sentences = []
-        
-        i = 0
-        while i < len(parts):
-            current = parts[i].strip()
-            boundary = parts[i + 1] if i + 1 < len(parts) else ""
-            
-            if current or boundary:
-                sentence = (current + boundary).strip()
-                if sentence:
-                    # Handle nested quotes and parentheses
-                    if ('「' in sentence and '」' not in sentence) or \
-                       ('（' in sentence and '）' not in sentence):
-                        continue_idx = i + 2
-                        while continue_idx < len(parts):
-                            if '」' in parts[continue_idx] or '）' in parts[continue_idx]:
-                                sentence += ''.join(parts[i+2:continue_idx+1])
-                                i = continue_idx
-                                break
-                            continue_idx += 1
-                    sentences.append(sentence)
-            i += 2
-        
-        return sentences if sentences else [text.strip()]
-            
-    except Exception as e:
-        logger.warning(f"Failed to split text into sentences: {str(e)}")
-        return [text.strip()]
-
-def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=5):
+def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
     """Create properly sized chunks with improved Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
     
     text = clean_text(text)
-    sentences = split_into_sentences(text)
+    sentences = text.split('\n')
     
     if not sentences:
         raise ValueError("テキストを文章に分割できませんでした")
@@ -161,14 +122,13 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=5):
         sentence_length = get_text_length(sentence)
         
         if sentence_length > max_chunk_size:
-            # If current chunk exists, add it to chunks
             if current_chunk:
-                chunks.append(''.join(current_chunk))
+                chunks.append(' '.join(current_chunk))
                 current_chunk = []
                 current_length = 0
             
             # Split long sentence at logical Japanese boundaries
-            particles = r'(では|には|から|まで|として|による|について|という|との|への|もの|こと|など|まま|ため)'
+            particles = r'(では|には|から|まで|として|による|について|という|との|への)'
             sub_parts = re.split(particles, sentence)
             current_sub_part = []
             current_sub_length = 0
@@ -180,16 +140,16 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=5):
                     current_sub_length += part_length
                 else:
                     if current_sub_part:
-                        chunks.append(''.join(current_sub_part))
+                        chunks.append(' '.join(current_sub_part))
                     current_sub_part = [part]
                     current_sub_length = part_length
             
             if current_sub_part:
-                chunks.append(''.join(current_sub_part))
+                chunks.append(' '.join(current_sub_part))
             continue
         
         if current_length + sentence_length > max_chunk_size:
-            chunks.append(''.join(current_chunk))
+            chunks.append(' '.join(current_chunk))
             current_chunk = [sentence]
             current_length = sentence_length
         else:
@@ -197,7 +157,7 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=5):
             current_length += sentence_length
     
     if current_chunk:
-        chunks.append(''.join(current_chunk))
+        chunks.append(' '.join(current_chunk))
     
     # Validate chunk content and limit total chunks
     valid_chunks = [chunk for chunk in chunks if chunk.strip()]
@@ -210,12 +170,16 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=5):
     
     return valid_chunks
 
-def summarize_chunk(chunk, index, total_chunks):
-    """Summarize chunk with improved error handling"""
+def summarize_chunk(chunk, index, total_chunks, start_time):
+    """Summarize chunk with improved error handling and timeout"""
     if not chunk.strip():
         return ""
         
     try:
+        # Check chunk timeout (8 seconds)
+        if time.time() - start_time > 8:
+            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
+            
         model_data = get_summarizer()
         if not model_data or not isinstance(model_data, dict):
             raise ValueError("サマライザーの初期化に失敗しました")
@@ -223,13 +187,13 @@ def summarize_chunk(chunk, index, total_chunks):
         # Add proper tokenization for Japanese text
         inputs = model_data["tokenizer"](chunk, truncation=True, max_length=1024, return_tensors="pt")
         
-        # Generate summary with proper error handling
+        # Generate summary with faster parameters
         summary_ids = model_data["model"].generate(
             inputs["input_ids"],
-            max_length=150,
-            min_length=40,
-            length_penalty=2.0,
-            num_beams=4,
+            max_length=100,
+            min_length=30,
+            length_penalty=1.5,
+            num_beams=2,
             early_stopping=True
         )
         
@@ -238,10 +202,10 @@ def summarize_chunk(chunk, index, total_chunks):
         
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
-        raise Exception(f"チャンク {index + 1} の要約に失敗しました: {str(e)}")
+        raise
 
 def summarize_text(text):
-    """Summarize text with improved error handling"""
+    """Summarize text with improved error handling and retry mechanism"""
     try:
         if not text:
             raise ValueError("入力テキストが空です")
@@ -252,42 +216,55 @@ def summarize_text(text):
         if len(text.strip()) < 10:
             raise ValueError("テキストが短すぎます")
         
-        chunks = create_chunks(text)
-        total_chunks = len(chunks)
-        
-        if total_chunks == 0:
-            raise ValueError("テキストを分割できませんでした")
-        
-        update_progress(0, total_chunks, "要約処理を開始します...")
-        summaries = []
         start_time = time.time()
+        max_retries = 2
+        current_retry = 0
         
-        for i, chunk in enumerate(chunks):
+        while current_retry <= max_retries:
             try:
-                if time.time() - start_time > 20:
-                    raise TimeoutError("要約処理の制限時間を超えました")
+                # Adjust chunk size based on retry attempt
+                max_chunk_size = 1024 >> current_retry  # Reduce size on each retry
+                chunks = create_chunks(text, max_chunk_size=max_chunk_size)
+                total_chunks = len(chunks)
                 
-                if not chunk.strip():
-                    logger.warning(f"チャンク {i + 1} が空です。スキップします。")
-                    continue
+                if total_chunks == 0:
+                    raise ValueError("テキストを分割できませんでした")
                 
-                summary = summarize_chunk(chunk, i, total_chunks)
-                if summary:
-                    summaries.append(summary)
-                update_progress(i + 1, total_chunks, f"チャンク {i + 1}/{total_chunks} を処理中...")
+                update_progress(0, total_chunks, "要約処理を開始します...")
+                summaries = []
+                chunk_start_time = time.time()
                 
+                for i, chunk in enumerate(chunks):
+                    # Check total timeout (30 seconds)
+                    if time.time() - start_time > 30:
+                        raise TimeoutError("要約処理の制限時間を超えました")
+                    
+                    if not chunk.strip():
+                        logger.warning(f"チャンク {i + 1} が空です。スキップします。")
+                        continue
+                    
+                    summary = summarize_chunk(chunk, i, total_chunks, chunk_start_time)
+                    if summary:
+                        summaries.append(summary)
+                    update_progress(i + 1, total_chunks, f"チャンク {i + 1}/{total_chunks} を処理中...")
+                    chunk_start_time = time.time()  # Reset timer for next chunk
+                
+                if summaries:
+                    final_summary = ' '.join(summaries)
+                    update_progress(total_chunks, total_chunks, "要約が完了しました")
+                    return final_summary
+                else:
+                    raise ValueError("要約を生成できませんでした")
+                    
+            except TimeoutError:
+                if current_retry == max_retries:
+                    raise
+                current_retry += 1
+                logger.warning(f"タイムアウトのため、より小さいチャンクサイズで再試行します ({current_retry}/{max_retries})")
+                continue
             except Exception as e:
-                logger.error(f"チャンク {i + 1} の処理中にエラー: {str(e)}")
-                update_progress(0, 0, f"エラー: チャンク {i + 1} の処理に失敗しました")
                 raise
-        
-        if not summaries:
-            raise ValueError("要約を生成できませんでした")
-        
-        final_summary = ' '.join(summaries)
-        update_progress(total_chunks, total_chunks, "要約が完了しました")
-        return final_summary
-        
+                
     except Exception as e:
         update_progress(0, 0, f"エラー: {str(e)}")
         logger.error(f"要約処理に失敗: {str(e)}")
