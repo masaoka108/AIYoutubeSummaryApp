@@ -41,12 +41,11 @@ def is_japanese_text(text):
 
 def validate_japanese_output(text):
     """Validate if the text contains Japanese characters when required"""
-    if is_japanese_text(text):
-        if not any(unicodedata.name(char).startswith('CJK UNIFIED') or 
-                   unicodedata.name(char).startswith('HIRAGANA') or 
-                   unicodedata.name(char).startswith('KATAKANA') 
-                   for char in text):
-            raise ValueError("Generated text is not in Japanese")
+    if not any(unicodedata.name(char).startswith('CJK UNIFIED') or 
+               unicodedata.name(char).startswith('HIRAGANA') or 
+               unicodedata.name(char).startswith('KATAKANA') 
+               for char in text):
+        raise ValueError("Generated text is not in Japanese")
     return text
 
 def load_models_async():
@@ -130,18 +129,28 @@ def summarize_chunk(chunk, index, total_chunks):
         if not chunk.strip():
             raise ValueError("空のチャンクは処理できません")
         
-        # Detect language
+        # For English content, explicitly request Japanese output
         is_jp = is_japanese_text(chunk)
-        
-        prompt = f'''{"以下の文章を要約してください。重要なポイントを3-5つにまとめてください：" if is_jp else "Please summarize the following text into 3-5 key points:"}
+        if not is_jp:
+            prompt = f'''以下の英語の文章を日本語で要約してください。重要なポイントを3-5つにまとめてください：
 
 {chunk}
 
-{"以下のフォーマットで出力してください：" if is_jp else "Please output in the following format:"}
+以下のフォーマットで出力してください：
 
-# {"要約" if is_jp else "Summary"}
+# 要約
 
-- {"重要ポイント：" if is_jp else "Key point:"} [具体的な内容]'''
+- 重要ポイント：[具体的な内容を日本語で記載]'''
+        else:
+            prompt = f'''以下の文章を要約してください。重要なポイントを3-5つにまとめてください：
+
+{chunk}
+
+以下のフォーマットで出力してください：
+
+# 要約
+
+- 重要ポイント：[具体的な内容]'''
 
         response = model.generate_content(prompt)
         summary = response.text.strip()
@@ -149,6 +158,9 @@ def summarize_chunk(chunk, index, total_chunks):
         # Validate summary content
         if not summary or "文章の内容が明確に示されていない" in summary or "文章がない" in summary:
             raise ValueError("有効な要約を生成できませんでした")
+            
+        if not is_jp:
+            validate_japanese_output(summary)
             
         return summary
         
@@ -188,7 +200,19 @@ def summarize_text(text):
         if not summaries:
             raise ValueError("要約を生成できませんでした")
             
-        return '\n\n'.join(summaries)
+        # Combine summaries into one
+        combined_summaries = []
+        for i, summary in enumerate(summaries):
+            # Remove extra "# 要約" headers except for the first one
+            if i == 0:
+                combined_summaries.append(summary)
+            else:
+                # Remove header and keep only bullet points
+                summary_lines = summary.split('\n')
+                bullet_points = [line for line in summary_lines if line.strip() and not line.startswith('#')]
+                combined_summaries.extend(bullet_points)
+        
+        return '\n'.join(combined_summaries)
         
     except TimeoutError as e:
         logger.error(f"Timeout error: {str(e)}")
@@ -206,20 +230,13 @@ def answer_question(question, context):
         if model is None:
             raise ValueError("QAモデルの初期化に失敗しました")
         
-        # Detect language and use appropriate prompt
-        is_jp = is_japanese_text(question)
-        prompt = f'''以下の文章に基づいて、質問に答えてください。
+        # Always respond in Japanese
+        prompt = f'''以下の文章に基づいて、日本語で質問に答えてください。
 
 文章：
 {context}
 
 質問：
-{question}''' if is_jp else f'''Based on the following text, please answer the question.
-
-Text:
-{context}
-
-Question:
 {question}'''
         
         response = model.generate_content(prompt)
@@ -228,6 +245,8 @@ Question:
         if not answer:
             raise ValueError("有効な回答を生成できませんでした")
             
+        # Validate Japanese output
+        validate_japanese_output(answer)
         return answer
         
     except Exception as e:
