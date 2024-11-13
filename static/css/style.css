@@ -59,24 +59,32 @@ body {
 .markdown-content {
     line-height: 1.8;
     padding: 1.5rem;
-    white-space: pre-line;
 }
 
 .markdown-content h1 {
     font-size: 1.75rem;
     margin: 1.5rem 0;
     color: #333;
+    font-weight: bold;
 }
 
 .markdown-content ul {
     padding-left: 1.5rem;
     margin: 1rem 0;
+    list-style-type: disc;
 }
 
 .markdown-content li {
-    margin: 1rem 0;
+    margin: 0.75rem 0;
+    padding-left: 0.5rem;
 }
 
 .markdown-content p {
     margin: 1rem 0;
+    white-space: pre-wrap;
+}
+
+.markdown-content br {
+    display: block;
+    margin: 0.5rem 0;
 }

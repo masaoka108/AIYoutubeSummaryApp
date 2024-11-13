@@ -13,12 +13,30 @@
                 <script>
                     document.addEventListener('DOMContentLoaded', function() {
                         const summaryContent = document.getElementById('summary-content');
-                        if (summaryContent) {
-                            const text = summaryContent.textContent;
-                            summaryContent.innerHTML = marked.parse(text, {
-                                breaks: true,
-                                gfm: true
-                            });
+                        const answerText = document.getElementById('answer-text');
+                        
+                        // Configure marked options
+                        marked.setOptions({
+                            breaks: true,
+                            gfm: true,
+                            smartLists: true,
+                            smartypants: true
+                        });
+                        
+                        // Function to render markdown
+                        function renderMarkdown(element) {
+                            if (element) {
+                                const text = element.textContent;
+                                // Clean up the text before rendering
+                                const cleanText = text.replace(/\n{3,}/g, '\n\n'); // Replace multiple newlines
+                                element.innerHTML = marked.parse(cleanText);
+                            }
+                        }
+                        
+                        // Render both summary and answer content
+                        renderMarkdown(summaryContent);
+                        if (answerText) {
+                            renderMarkdown(answerText);
                         }
                     });
                 </script>
