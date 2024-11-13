@@ -100,7 +100,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=512, max_chunks=3):
+def create_chunks(text, max_chunk_size=256, max_chunks=2):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -145,18 +145,38 @@ def create_chunks(text, max_chunk_size=512, max_chunks=3):
 
 def summarize_chunk(chunk, index, total_chunks):
     try:
+        if not chunk.strip():
+            return ""
+            
         model = get_model()
-        summary = model(
+        
+        # Add proper input validation
+        if len(chunk) > 1024:
+            chunk = chunk[:1024]
+            
+        # Use proper model parameters for Japanese text
+        outputs = model(
             chunk,
             max_length=150,
-            min_length=40,
-            do_sample=False
-        )[0]["summary_text"]
+            min_length=30,
+            length_penalty=2.0,
+            num_beams=2,
+            early_stopping=True,
+            truncation=True
+        )
         
-        return summary.strip()
+        # Add proper output validation
+        if not outputs or not isinstance(outputs, list):
+            raise ValueError("モデルの出力が無効です")
+            
+        summary = outputs[0].get('summary_text', '').strip()
+        if not summary:
+            raise ValueError("空の要約が生成されました")
+            
+        return summary
         
     except Exception as e:
-        logger.error(f"Chunk {index + 1} summarization failed: {str(e)}")
+        logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
         raise
 
 def summarize_text(text):
@@ -166,7 +186,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
         
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=512, max_chunks=3)
+        chunks = create_chunks(text, max_chunk_size=256, max_chunks=2)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
