@@ -2,7 +2,7 @@ import re
 import threading
 import unicodedata
 import logging
-from transformers import pipeline
+from transformers import MBartForConditionalGeneration, MBartTokenizer, pipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -14,12 +14,17 @@ qa_model = None
 model_lock = threading.Lock()
 
 def load_models():
-    """Load models in a separate thread"""
+    """Load models with improved Japanese support"""
     global summarizer, qa_model
     with model_lock:
         if summarizer is None:
-            logger.info("Loading summarization model...")
-            summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+            logger.info("Loading Japanese-aware summarization model...")
+            model_name = "facebook/mbart-large-cc25"
+            model = MBartForConditionalGeneration.from_pretrained(model_name)
+            tokenizer = MBartTokenizer.from_pretrained(model_name)
+            tokenizer.src_lang = "ja_XX"
+            summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
+            
         if qa_model is None:
             logger.info("Loading QA model...")
             qa_model = pipeline("question-answering", model="bert-large-uncased-whole-word-masking-finetuned-squad")
@@ -57,16 +62,20 @@ def clean_text(text):
     """Clean and validate text for summarization"""
     if not isinstance(text, str):
         raise ValueError("入力テキストは文字列である必要があります")
-    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Normalize Japanese text
+    text = unicodedata.normalize('NFKC', text)
+    # Remove extra whitespace while preserving Japanese text
+    text = re.sub(r'[\s\u3000]+', ' ', text).strip()
     return text
 
 def split_into_sentences(text):
-    """Split text into sentences with proper Japanese boundary detection"""
+    """Split text into sentences with improved Japanese boundary detection"""
     if not text:
         return []
 
-    # Pattern for Japanese and English sentence boundaries including multiple spaces
-    pattern = r'([。．.!?！？\n]|\s{2,})'
+    # Enhanced pattern for Japanese and English sentence boundaries
+    pattern = r'([。．.!?！？\n]|\s{2,}|(?<=」)(?![\s。．.!?！？]))'
     
     try:
         # Split text into sentences while preserving boundaries
@@ -78,25 +87,34 @@ def split_into_sentences(text):
             current = parts[i].strip()
             boundary = parts[i + 1] if i + 1 < len(parts) else ""
             
+            # Handle Japanese quotation marks and parentheses
             if current or boundary:
                 sentence = (current + boundary).strip()
-                if sentence:  # Only add non-empty sentences
+                if sentence:
+                    # Ensure proper handling of Japanese quotes
+                    if '「' in sentence and '」' not in sentence:
+                        # Continue collecting text until closing quote
+                        continue_idx = i + 2
+                        while continue_idx < len(parts):
+                            sentence += parts[continue_idx]
+                            if '」' in parts[continue_idx]:
+                                break
+                            continue_idx += 1
+                        i = continue_idx
                     sentences.append(sentence)
             i += 2
         
         if not sentences:
-            # If no valid sentences found, treat the whole text as one sentence
             return [text.strip()] if text.strip() else []
             
         return sentences
         
     except Exception as e:
         logger.warning(f"Failed to split text into sentences: {str(e)}")
-        # Return original text as single sentence if splitting fails
         return [text.strip()] if text.strip() else []
 
 def truncate_to_size(text, target_size):
-    """Truncate text to target size with improved boundary detection"""
+    """Truncate text to target size with improved Japanese text handling"""
     if not text:
         return text
         
@@ -120,15 +138,19 @@ def truncate_to_size(text, target_size):
         
         if result:
             return ''.join(result)
-            
-        # If no complete sentence fits, take the first sentence and truncate it
+        
+        # If no complete sentence fits, truncate carefully
         first_sentence = sentences[0] if sentences else text
         truncated = ''
         current_length = 0
         
+        # Handle Japanese characters properly
         for char in first_sentence:
             char_length = 2 if unicodedata.east_asian_width(char) in ['F', 'W'] else 1
             if current_length + char_length > target_size:
+                # Try to find a proper break point
+                if char in '、。．.!?！？':
+                    truncated += char
                 break
             truncated += char
             current_length += char_length
@@ -137,11 +159,10 @@ def truncate_to_size(text, target_size):
         
     except Exception as e:
         logger.warning(f"Failed to truncate text properly: {str(e)}")
-        # Fallback to simple truncation
         return text[:target_size]
 
 def create_chunks(text, max_chunk_size=512, min_chunk_size=50):
-    """Create properly sized chunks with strict size limits"""
+    """Create properly sized chunks with improved Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
     
@@ -160,61 +181,63 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=50):
     for sentence in sentences:
         sentence_length = get_text_length(sentence)
         
-        # If adding this sentence would exceed max size
+        # Handle long sentences
+        if sentence_length > max_chunk_size:
+            if current_chunk:
+                chunks.append(''.join(current_chunk))
+                current_chunk = []
+                current_length = 0
+            
+            # Split long sentence at Japanese particles or punctuation
+            sub_parts = re.split(r'(で|に|を|は|が|の|、|。)', sentence)
+            current_sub_part = []
+            current_sub_length = 0
+            
+            for part in sub_parts:
+                part_length = get_text_length(part)
+                if current_sub_length + part_length <= max_chunk_size:
+                    current_sub_part.append(part)
+                    current_sub_length += part_length
+                else:
+                    if current_sub_part:
+                        chunks.append(''.join(current_sub_part))
+                    current_sub_part = [part]
+                    current_sub_length = part_length
+            
+            if current_sub_part:
+                chunks.append(''.join(current_sub_part))
+            continue
+        
+        # Normal sentence handling
         if current_length + sentence_length > max_chunk_size:
             if current_chunk:
-                # Join and validate current chunk
-                chunk_text = ''.join(current_chunk)
-                chunk_length = get_text_length(chunk_text)
-                
-                if chunk_length > max_chunk_size:
-                    # Truncate if chunk is still too large
-                    chunk_text = truncate_to_size(chunk_text, max_chunk_size)
-                
-                if chunk_text:
-                    chunks.append(chunk_text)
-                
-                # Start new chunk with current sentence
-                current_chunk = [sentence]
-                current_length = sentence_length
-            else:
-                # If single sentence is too long, truncate it
-                truncated = truncate_to_size(sentence, max_chunk_size)
-                if truncated:
-                    chunks.append(truncated)
+                chunks.append(''.join(current_chunk))
+            current_chunk = [sentence]
+            current_length = sentence_length
         else:
             current_chunk.append(sentence)
             current_length += sentence_length
     
-    # Handle the last chunk
+    # Add the last chunk
     if current_chunk:
-        chunk_text = ''.join(current_chunk)
-        chunk_length = get_text_length(chunk_text)
-        
-        if chunk_length > max_chunk_size:
-            chunk_text = truncate_to_size(chunk_text, max_chunk_size)
-            
-        if chunk_text:
-            chunks.append(chunk_text)
+        chunks.append(''.join(current_chunk))
     
     # Ensure we have at least one chunk
     if not chunks:
-        # If no valid chunks created, create one from truncated original text
         return [truncate_to_size(text, max_chunk_size)]
     
     return chunks
 
 def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_length):
-    """Summarize chunk with improved error handling and retries"""
+    """Summarize chunk with improved Japanese text handling"""
     if not chunk or not chunk.strip():
         raise ValueError(f"チャンク {index + 1} が空です")
     
-    chunk_sizes = [512, 256, 128]  # Gradually reduce chunk size on failure
+    chunk_sizes = [512, 256, 128]
     model = get_summarizer()
     
     for chunk_size in chunk_sizes:
         try:
-            # Validate and truncate chunk
             current_length = get_text_length(chunk)
             logger.info(f"Processing chunk {index + 1}/{total_chunks} (length: {current_length})")
             
@@ -227,23 +250,21 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_lengt
                 current_length = get_text_length(chunk)
                 logger.info(f"Truncated chunk {index + 1} to length: {current_length}")
             
-            # Additional validation
-            if current_length < min_length:
-                logger.warning(f"Chunk {index + 1} is too short after truncation")
-                continue
-            
-            # Attempt summarization with error handling
+            # Attempt summarization with Japanese-specific settings
             try:
-                summary = model(chunk, max_length=max_length, min_length=min_length, do_sample=False)
+                summary = model(
+                    chunk,
+                    max_length=max_length,
+                    min_length=min_length,
+                    do_sample=False,
+                    forced_bos_token_id=model.tokenizer.lang_code_to_id["ja_XX"]
+                )
                 
                 if summary and isinstance(summary, list) and len(summary) > 0:
                     summary_text = summary[0].get('summary_text', '').strip()
                     if summary_text:
                         logger.info(f"Successfully summarized chunk {index + 1}/{total_chunks}")
                         return summary_text
-            except IndexError as e:
-                logger.warning(f"Index error in chunk {index + 1}: {str(e)}")
-                continue
             except Exception as e:
                 logger.warning(f"Summarization error in chunk {index + 1}: {str(e)}")
                 continue
@@ -259,7 +280,7 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_lengt
     raise ValueError(f"チャンク {index + 1} の要約に失敗しました")
 
 def summarize_text(text, max_length=130, min_length=30):
-    """Summarize text with improved Japanese support and error handling"""
+    """Summarize text with improved Japanese support"""
     try:
         if not text:
             raise ValueError("入力テキストが空です")
@@ -298,10 +319,8 @@ def answer_question(question, context):
             raise ValueError("QAモデルの初期化に失敗しました")
             
         result = model(
-            inputs={
-                'question': question,
-                'context': context
-            },
+            question=question,
+            context=context,
             max_answer_length=100
         )
         
