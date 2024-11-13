@@ -88,3 +88,16 @@ body {
     display: block;
     margin: 0.5rem 0;
 }
+
+/* Added styles for better bold text handling */
+.markdown-content strong,
+.markdown-content .markdown-bold {
+    font-weight: 700;
+    color: #000;
+}
+
+/* Ensure bold text is visible in light backgrounds */
+.bg-light .markdown-content strong,
+.bg-light .markdown-content .markdown-bold {
+    color: #333;
+}

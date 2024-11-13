@@ -15,21 +15,33 @@
                         const summaryContent = document.getElementById('summary-content');
                         const answerText = document.getElementById('answer-text');
                         
-                        // Configure marked options
+                        // Configure marked options for better markdown handling
                         marked.setOptions({
                             breaks: true,
                             gfm: true,
+                            pedantic: false,
                             smartLists: true,
-                            smartypants: true
+                            smartypants: true,
+                            xhtml: true
                         });
                         
-                        // Function to render markdown
+                        // Function to render markdown with proper bold text handling
                         function renderMarkdown(element) {
                             if (element) {
                                 const text = element.textContent;
                                 // Clean up the text before rendering
-                                const cleanText = text.replace(/\n{3,}/g, '\n\n'); // Replace multiple newlines
+                                const cleanText = text
+                                    .replace(/\n{3,}/g, '\n\n') // Replace multiple newlines
+                                    .replace(/\*\*/g, '**') // Normalize bold syntax
+                                    .replace(/__/g, '**'); // Convert underscores to asterisks for consistency
+                                
+                                // Render markdown and set innerHTML
                                 element.innerHTML = marked.parse(cleanText);
+                                
+                                // Add specific class to bold elements
+                                element.querySelectorAll('strong').forEach(strong => {
+                                    strong.classList.add('markdown-bold');
+                                });
                             }
                         }
                         
