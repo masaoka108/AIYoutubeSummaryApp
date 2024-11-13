@@ -40,7 +40,7 @@ def validate_japanese_output(text):
                unicodedata.name(char).startswith('HIRAGANA') or 
                unicodedata.name(char).startswith('KATAKANA') 
                for char in text):
-        raise ValueError("生成されたテキストが日本語が含まれていません")
+        raise ValueError("生成されたテキストが日本語ではありません")
     return text
 
 def is_japanese_text(text):
@@ -146,12 +146,21 @@ def create_chunks(text, max_chunk_size=512, max_chunks=2):
     return valid_chunks
 
 def summarize_chunk(chunk, index, total_chunks):
+    chunk_start_time = time.time()
+    chunk_timeout = 10  # seconds per chunk
+    
     try:
         if not chunk.strip():
             return ""
             
         model = get_model()
-        
+        if model is None:
+            raise ValueError("モデルの初期化に失敗しました")
+            
+        # Check chunk-level timeout
+        if time.time() - chunk_start_time > chunk_timeout:
+            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
+            
         # Handle Japanese text specifically
         inputs = chunk
         
@@ -165,6 +174,10 @@ def summarize_chunk(chunk, index, total_chunks):
             no_repeat_ngram_size=3
         )
         
+        # Check chunk-level timeout again after model inference
+        if time.time() - chunk_start_time > chunk_timeout:
+            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
+            
         # Properly handle model output
         if isinstance(outputs, list) and outputs:
             summary = outputs[0]["summary_text"]
@@ -179,16 +192,22 @@ def summarize_chunk(chunk, index, total_chunks):
             
         return summary
         
+    except TimeoutError as e:
+        logger.error(f"Chunk timeout error: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
         raise
 
 def summarize_text(text):
     """Summarize text with improved Japanese handling"""
+    start_time = time.time()
+    max_processing_time = 25  # seconds
+    
     try:
         if not text:
             raise ValueError("入力テキストが空です")
-        
+            
         update_progress(0, 100, "テキストを準備中...")
         chunks = create_chunks(text, max_chunk_size=512, max_chunks=2)
         total_chunks = len(chunks)
@@ -197,6 +216,10 @@ def summarize_text(text):
         summaries = []
         
         for i, chunk in enumerate(chunks):
+            # Check total processing time
+            if time.time() - start_time > max_processing_time:
+                raise TimeoutError("要約処理の制限時間を超えました")
+                
             if not chunk.strip():
                 continue
                 
@@ -204,25 +227,37 @@ def summarize_text(text):
             if summary:
                 summaries.append(summary)
             update_progress(i + 1, total_chunks)
-        
+            
         if not summaries:
             raise ValueError("要約を生成できませんでした")
             
         return ' '.join(summaries)
         
+    except TimeoutError as e:
+        logger.error(f"Timeout error: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"要約処理に失敗: {str(e)}")
         raise
 
 def answer_question(question, context):
     try:
+        if not question or not context:
+            raise ValueError("質問とコンテキストは必須です")
+            
         model = get_qa_model()
+        if model is None:
+            raise ValueError("QAモデルの初期化に失敗しました")
+            
         answer = model(
             question=question,
             context=context
-        )["answer"]
+        )
         
-        return answer.strip()
+        if not answer or not isinstance(answer, dict) or "answer" not in answer:
+            raise ValueError("有効な回答を生成できませんでした")
+            
+        return answer["answer"].strip()
         
     except Exception as e:
         logger.error(f"Question answering failed: {str(e)}")
