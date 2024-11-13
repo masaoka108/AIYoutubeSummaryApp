@@ -84,7 +84,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=2000, max_chunks=3):
+def create_chunks(text, max_chunk_size=1500, max_chunks=3):
     """Create properly sized chunks with language detection"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -127,42 +127,30 @@ def create_chunks(text, max_chunk_size=2000, max_chunks=3):
 def summarize_chunk(chunk, index, total_chunks):
     try:
         model = get_model()
-        if not model:
-            raise ValueError("Model initialization failed")
+        if not chunk.strip():
+            raise ValueError("空のチャンクは処理できません")
         
         # Detect language
         is_jp = is_japanese_text(chunk)
         
-        prompt = '''Please summarize the following text into 3-5 key points:
+        prompt = f'''{"以下の文章を要約してください。重要なポイントを3-5つにまとめてください：" if is_jp else "Please summarize the following text into 3-5 key points:"}
 
-# Summary
+{chunk}
 
-- Key point 1
+{"以下のフォーマットで出力してください：" if is_jp else "Please output in the following format:"}
 
-- Key point 2
+# {"要約" if is_jp else "Summary"}
 
-- Key point 3
+- {"重要ポイント：" if is_jp else "Key point:"} [具体的な内容]'''
 
-{chunk}''' if not is_jp else '''以下の文章を要約してください。
-重要なポイントを3-5つにまとめて、以下のような形式で出力してください：
-
-# 要約
-
-- 重要ポイント1
-
-- 重要ポイント2
-
-- 重要ポイント3
-
-{chunk}'''
-        
         response = model.generate_content(prompt)
         summary = response.text.strip()
         
-        if not summary:
-            raise ValueError("Empty summary generated")
+        # Validate summary content
+        if not summary or "文章の内容が明確に示されていない" in summary or "文章がない" in summary:
+            raise ValueError("有効な要約を生成できませんでした")
             
-        return summary if not is_jp else validate_japanese_output(summary)
+        return summary
         
     except Exception as e:
         logger.error(f"Chunk {index + 1} summarization failed: {str(e)}")
