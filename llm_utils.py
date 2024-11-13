@@ -40,7 +40,7 @@ def validate_japanese_output(text):
                unicodedata.name(char).startswith('HIRAGANA') or 
                unicodedata.name(char).startswith('KATAKANA') 
                for char in text):
-        raise ValueError("生成されたテキストに日本語が含まれていません")
+        raise ValueError("生成されたテキストが日本語が含まれていません")
     return text
 
 def is_japanese_text(text):
@@ -55,7 +55,8 @@ def load_models_async():
         logger.info("Loading summarization model...")
         summarizer = pipeline(
             "summarization",
-            model="facebook/bart-large-cnn",
+            model="facebook/mbart-large-cc25",
+            tokenizer="facebook/mbart-large-cc25",
             device="cpu"
         )
         
@@ -71,6 +72,7 @@ def load_models_async():
             
     except Exception as e:
         logger.error(f"Error loading models: {str(e)}")
+        raise
 
 def get_model():
     """Get or initialize summarizer"""
@@ -100,7 +102,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=128, max_chunks=2):
+def create_chunks(text, max_chunk_size=512, max_chunks=2):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -150,35 +152,33 @@ def summarize_chunk(chunk, index, total_chunks):
             
         model = get_model()
         
-        # Add try-except for model call
-        try:
-            outputs = model(
-                chunk,
-                max_length=150,
-                min_length=30,
-                num_beams=2,
-                do_sample=False,
-                early_stopping=True
-            )
+        # Handle Japanese text specifically
+        inputs = chunk
+        
+        # Add proper Japanese model parameters
+        outputs = model(
+            inputs,
+            max_length=150,
+            min_length=30,
+            forced_bos_token_id=model.tokenizer.lang_code_to_id["ja_XX"],
+            early_stopping=True,
+            no_repeat_ngram_size=3
+        )
+        
+        # Properly handle model output
+        if isinstance(outputs, list) and outputs:
+            summary = outputs[0]["summary_text"]
+        else:
+            summary = outputs["summary_text"]
             
-            # Handle different output formats
-            if isinstance(outputs, dict):
-                summary = outputs.get('summary_text', '')
-            elif isinstance(outputs, list) and outputs:
-                summary = outputs[0].get('summary_text', '')
-            else:
-                raise ValueError("無効なモデル出力形式です")
-                
-            summary = summary.strip()
-            if not summary:
-                raise ValueError("空の要約が生成されました")
-                
-            return summary
+        summary = summary.strip()
+        
+        # Validate Japanese output
+        if not is_japanese_text(summary):
+            raise ValueError("生成されたテキストが日本語ではありません")
             
-        except Exception as e:
-            logger.error(f"Model inference error: {str(e)}")
-            raise ValueError(f"モデル推論エラー: {str(e)}")
-            
+        return summary
+        
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
         raise
@@ -190,7 +190,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
         
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=128, max_chunks=2)
+        chunks = create_chunks(text, max_chunk_size=512, max_chunks=2)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
