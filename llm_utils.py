@@ -2,15 +2,35 @@ import re
 import threading
 import unicodedata
 import logging
+import time
 from transformers import MBartForConditionalGeneration, MBartTokenizer, pipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variables for models
+# Global variables for models and progress tracking
 summarizer = None
 qa_model = None
+summarization_progress = {"current": 0, "total": 0, "status": "idle"}
+processing_lock = threading.Lock()
+
+def get_progress():
+    """Get current summarization progress"""
+    with processing_lock:
+        return {
+            "current": summarization_progress["current"],
+            "total": summarization_progress["total"],
+            "status": summarization_progress["status"],
+            "percentage": int((summarization_progress["current"] / max(summarization_progress["total"], 1)) * 100)
+        }
+
+def update_progress(current, total, status="processing"):
+    """Update summarization progress"""
+    with processing_lock:
+        summarization_progress["current"] = current
+        summarization_progress["total"] = total
+        summarization_progress["status"] = status
 
 def load_models():
     """Load models with Japanese summarization support"""
@@ -63,9 +83,7 @@ def clean_text(text):
     if not isinstance(text, str):
         raise ValueError("入力テキストは文字列である必要があります")
     
-    # Normalize Japanese text
     text = unicodedata.normalize('NFKC', text)
-    # Remove extra whitespace while preserving Japanese text
     text = re.sub(r'[\s\u3000]+', ' ', text).strip()
     return text
 
@@ -74,11 +92,9 @@ def split_into_sentences(text):
     if not text:
         return []
 
-    # Enhanced pattern for Japanese sentence boundaries
     pattern = r'([。．.!?！？\n]|\s{2,}|(?<=」)(?![\s。．.!?！？])|(?<=）)(?![\s。．.!?！？]))'
     
     try:
-        # Split text into sentences while preserving boundaries
         parts = re.split(pattern, text)
         sentences = []
         
@@ -90,7 +106,6 @@ def split_into_sentences(text):
             if current or boundary:
                 sentence = (current + boundary).strip()
                 if sentence:
-                    # Handle Japanese parentheses and quotes
                     if ('「' in sentence and '」' not in sentence) or ('（' in sentence and '）' not in sentence):
                         continue_idx = i + 2
                         while continue_idx < len(parts):
@@ -102,26 +117,18 @@ def split_into_sentences(text):
                     sentences.append(sentence)
             i += 2
         
-        if not sentences:
-            return [text.strip()] if text.strip() else []
+        return sentences if sentences else [text.strip()] if text.strip() else []
             
-        return sentences
-        
     except Exception as e:
         logger.warning(f"Failed to split text into sentences: {str(e)}")
         return [text.strip()] if text.strip() else []
 
-def create_chunks(text, max_chunk_size=256, min_chunk_size=50):
+def create_chunks(text, max_chunk_size=128, min_chunk_size=30):
     """Create properly sized chunks with improved Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
     
     text = clean_text(text)
-    text_length = get_text_length(text)
-    
-    if text_length <= min_chunk_size:
-        return [text]
-    
     chunks = []
     sentences = split_into_sentences(text)
     
@@ -131,14 +138,12 @@ def create_chunks(text, max_chunk_size=256, min_chunk_size=50):
     for sentence in sentences:
         sentence_length = get_text_length(sentence)
         
-        # Handle long sentences
         if sentence_length > max_chunk_size:
             if current_chunk:
                 chunks.append(''.join(current_chunk))
                 current_chunk = []
                 current_length = 0
             
-            # Split long sentence at Japanese particles or punctuation
             sub_parts = re.split(r'(で|に|を|は|が|の|、|。)', sentence)
             current_sub_part = []
             current_sub_length = 0
@@ -158,7 +163,6 @@ def create_chunks(text, max_chunk_size=256, min_chunk_size=50):
                 chunks.append(''.join(current_sub_part))
             continue
         
-        # Normal sentence handling
         if current_length + sentence_length > max_chunk_size:
             if current_chunk:
                 chunks.append(''.join(current_chunk))
@@ -168,22 +172,17 @@ def create_chunks(text, max_chunk_size=256, min_chunk_size=50):
             current_chunk.append(sentence)
             current_length += sentence_length
     
-    # Add the last chunk
     if current_chunk:
         chunks.append(''.join(current_chunk))
     
-    # Ensure we have at least one chunk
-    if not chunks:
-        return [text[:max_chunk_size]]
-    
-    return chunks
+    return chunks if chunks else [text[:max_chunk_size]]
 
-def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=130, min_length=30):
+def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=100, min_length=30):
     """Summarize chunk with improved Japanese text handling"""
     if not chunk or not chunk.strip():
         raise ValueError(f"チャンク {index + 1} が空です")
     
-    chunk_sizes = [256, 128, 64]
+    chunk_sizes = [128, 64, 32]
     model = get_summarizer()
     
     for chunk_size in chunk_sizes:
@@ -196,7 +195,6 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=130, min_l
                 current_length = get_text_length(chunk)
                 logger.info(f"Truncated chunk {index + 1} to length: {current_length}")
             
-            # Attempt summarization with Japanese-specific settings
             try:
                 summary = model(
                     chunk,
@@ -214,8 +212,6 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=130, min_l
                 logger.warning(f"Summarization error in chunk {index + 1}: {str(e)}")
                 continue
             
-            logger.warning(f"Invalid summary result for chunk {index + 1}")
-            
         except Exception as e:
             logger.warning(f"Failed to process chunk {index + 1} with size {chunk_size}: {str(e)}")
             if chunk_size == chunk_sizes[-1]:
@@ -224,22 +220,32 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=130, min_l
     
     raise ValueError(f"チャンク {index + 1} の要約に失敗しました")
 
-def summarize_text(text, max_length=130, min_length=30):
-    """Summarize text with improved Japanese support"""
+def summarize_text(text):
+    """Summarize text with improved Japanese support and progress tracking"""
     try:
         if not text:
             raise ValueError("入力テキストが空です")
         
+        update_progress(0, 100, "準備中...")
         text = clean_text(text)
         chunks = create_chunks(text)
-        logger.info(f"Created {len(chunks)} chunks for summarization")
+        total_chunks = len(chunks)
+        logger.info(f"Created {total_chunks} chunks for summarization")
         
+        update_progress(0, total_chunks, "要約処理中...")
         summaries = []
+        start_time = time.time()
+        
         for i, chunk in enumerate(chunks):
             try:
-                summary = summarize_chunk_with_retry(chunk, i, len(chunks), max_length, min_length)
+                if time.time() - start_time > 30:
+                    raise TimeoutError("要約処理がタイムアウトしました")
+                
+                summary = summarize_chunk_with_retry(chunk, i, total_chunks)
                 if summary:
                     summaries.append(summary)
+                update_progress(i + 1, total_chunks, "要約処理中...")
+                
             except Exception as e:
                 logger.error(f"Failed to summarize chunk {i + 1}: {str(e)}")
                 raise
@@ -247,9 +253,12 @@ def summarize_text(text, max_length=130, min_length=30):
         if not summaries:
             raise ValueError("要約を生成できませんでした")
         
-        return ' '.join(summaries)
+        final_summary = ' '.join(summaries)
+        update_progress(total_chunks, total_chunks, "完了")
+        return final_summary
         
     except Exception as e:
+        update_progress(0, 0, f"エラー: {str(e)}")
         logger.error(f"Summarization failed: {str(e)}")
         raise Exception(f"テキストの要約に失敗しました: {str(e)}")
 

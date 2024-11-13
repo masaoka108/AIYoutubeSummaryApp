@@ -3,8 +3,11 @@ from flask import Flask, render_template, request, jsonify, flash
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
 from youtube_utils import get_video_info, extract_video_id
-from llm_utils import summarize_text, answer_question
+from llm_utils import summarize_text, answer_question, get_progress
 from flask_wtf.csrf import CSRFProtect
+import threading
+import queue
+import time
 
 class Base(DeclarativeBase):
     pass
@@ -15,6 +18,49 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev_key_123"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///youtube_summary.db"
 csrf = CSRFProtect(app)
 db.init_app(app)
+
+# Global queue for processing tasks
+processing_queue = queue.Queue()
+processing_results = {}
+
+def process_video_summary(video_id, video_info):
+    """Background task for processing video summary"""
+    try:
+        summary = summarize_text(video_info['transcript'])
+        
+        from models import Summary
+        with app.app_context():
+            new_summary = Summary(video_id=video_id, summary=summary)
+            db.session.add(new_summary)
+            db.session.commit()
+        
+        processing_results[video_id] = {
+            'status': 'completed',
+            'data': {
+                'video': video_info,
+                'summary': summary
+            }
+        }
+    except Exception as e:
+        processing_results[video_id] = {
+            'status': 'error',
+            'error': str(e)
+        }
+
+def process_queue():
+    """Process tasks in the background queue"""
+    while True:
+        try:
+            video_id, video_info = processing_queue.get(timeout=1)
+            process_video_summary(video_id, video_info)
+        except queue.Empty:
+            time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Background processing error: {str(e)}")
+
+# Start background processing thread
+background_thread = threading.Thread(target=process_queue, daemon=True)
+background_thread.start()
 
 @app.route('/', methods=['GET'])
 def index():
@@ -34,19 +80,56 @@ def summarize():
 
     try:
         video_info = get_video_info(video_id)
-        summary = summarize_text(video_info['transcript'])
+        processing_results[video_id] = {'status': 'processing'}
+        processing_queue.put((video_id, video_info))
         
-        from models import Summary
-        new_summary = Summary(video_id=video_id, summary=summary)
-        db.session.add(new_summary)
-        db.session.commit()
-        
-        return render_template('result.html', 
+        return render_template('processing.html', 
                              video=video_info,
-                             summary=summary)
+                             video_id=video_id)
     except Exception as e:
         flash(f'エラーが発生しました: {str(e)}', 'error')
         return render_template('index.html')
+
+@app.route('/progress/<video_id>', methods=['GET'])
+def check_progress(video_id):
+    """Check the progress of video processing"""
+    if video_id not in processing_results:
+        return jsonify({'status': 'not_found'}), 404
+        
+    result = processing_results[video_id]
+    if result['status'] == 'processing':
+        progress = get_progress()
+        return jsonify({
+            'status': 'processing',
+            'progress': progress
+        })
+    elif result['status'] == 'completed':
+        return jsonify({
+            'status': 'completed',
+            'redirect': f'/result/{video_id}'
+        })
+    else:
+        return jsonify({
+            'status': 'error',
+            'error': result.get('error', '不明なエラーが発生しました')
+        })
+
+@app.route('/result/<video_id>', methods=['GET'])
+def show_result(video_id):
+    """Show the processing result"""
+    if video_id not in processing_results:
+        flash('処理結果が見つかりません', 'error')
+        return render_template('index.html')
+        
+    result = processing_results[video_id]
+    if result['status'] != 'completed':
+        return render_template('processing.html',
+                             video=result.get('data', {}).get('video', {}),
+                             video_id=video_id)
+    
+    return render_template('result.html',
+                         video=result['data']['video'],
+                         summary=result['data']['summary'])
 
 @app.route('/ask', methods=['POST'])
 def ask():
