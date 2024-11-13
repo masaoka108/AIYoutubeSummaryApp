@@ -55,6 +55,8 @@ def get_transcript(video_id):
     """Get transcript with improved language support and caching"""
     cached_transcript = get_cached_transcript(video_id)
     if cached_transcript:
+        logger.info(f"Transcript content for video {video_id} (cached):")
+        logger.info(cached_transcript[:500] + "..." if len(cached_transcript) > 500 else cached_transcript)
         return cached_transcript
         
     try:
@@ -79,6 +81,10 @@ def get_transcript(video_id):
 
         entries = transcript.fetch()
         transcript_text = ' '.join(entry['text'] for entry in entries)
+        
+        # Add debug logging
+        logger.info(f"Transcript content for video {video_id}:")
+        logger.info(transcript_text[:500] + "..." if len(transcript_text) > 500 else transcript_text)
         
         # Cache the transcript
         cache_transcript(video_id, transcript_text, language)
