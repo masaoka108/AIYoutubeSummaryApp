@@ -100,7 +100,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=256, max_chunks=2):
+def create_chunks(text, max_chunk_size=128, max_chunks=2):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -150,31 +150,35 @@ def summarize_chunk(chunk, index, total_chunks):
             
         model = get_model()
         
-        # Add proper input validation
-        if len(chunk) > 1024:
-            chunk = chunk[:1024]
+        # Add try-except for model call
+        try:
+            outputs = model(
+                chunk,
+                max_length=150,
+                min_length=30,
+                num_beams=2,
+                do_sample=False,
+                early_stopping=True
+            )
             
-        # Use proper model parameters for Japanese text
-        outputs = model(
-            chunk,
-            max_length=150,
-            min_length=30,
-            length_penalty=2.0,
-            num_beams=2,
-            early_stopping=True,
-            truncation=True
-        )
-        
-        # Add proper output validation
-        if not outputs or not isinstance(outputs, list):
-            raise ValueError("モデルの出力が無効です")
+            # Handle different output formats
+            if isinstance(outputs, dict):
+                summary = outputs.get('summary_text', '')
+            elif isinstance(outputs, list) and outputs:
+                summary = outputs[0].get('summary_text', '')
+            else:
+                raise ValueError("無効なモデル出力形式です")
+                
+            summary = summary.strip()
+            if not summary:
+                raise ValueError("空の要約が生成されました")
+                
+            return summary
             
-        summary = outputs[0].get('summary_text', '').strip()
-        if not summary:
-            raise ValueError("空の要約が生成されました")
+        except Exception as e:
+            logger.error(f"Model inference error: {str(e)}")
+            raise ValueError(f"モデル推論エラー: {str(e)}")
             
-        return summary
-        
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
         raise
@@ -186,7 +190,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
         
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=256, max_chunks=2)
+        chunks = create_chunks(text, max_chunk_size=128, max_chunks=2)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
