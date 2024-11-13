@@ -1,0 +1,57 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.navbar {
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+}
+
+.btn-primary {
+    background-color: #5BC0DE;
+    border-color: #5BC0DE;
+}
+
+.btn-primary:hover {
+    background-color: #46b8da;
+    border-color: #46b8da;
+}
+
+.card {
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+}
+
+.form-control {
+    border-radius: 8px;
+}
+
+.social-links a {
+    font-size: 1.5rem;
+    text-decoration: none;
+}
+
+.social-links a:hover {
+    opacity: 0.8;
+}
+
+#answer-section {
+    transition: all 0.3s ease;
+}
+
+.loading {
+    text-align: center;
+    padding: 20px;
+}
+
+.loading::after {
+    content: "...";
+    animation: dots 1s steps(5, end) infinite;
+}
+
+@keyframes dots {
+    0%, 20% { content: "."; }
+    40% { content: ".."; }
+    60% { content: "..."; }
+    80% { content: "...."; }
+    100% { content: "....."; }
+}
