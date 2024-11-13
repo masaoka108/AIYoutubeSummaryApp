@@ -4,7 +4,7 @@ import unicodedata
 import logging
 import time
 import torch
-from transformers import BartForConditionalGeneration, BartTokenizer, pipeline
+from transformers import pipeline, MBartTokenizer, MBartForConditionalGeneration
 from functools import lru_cache
 
 # Configure logging
@@ -35,19 +35,32 @@ def update_progress(current, total, status="processing"):
         summarization_progress["status"] = status
         logger.info(f"Progress: {current}/{total} - {status}")
 
+def validate_japanese_output(text):
+    """Validate if the text contains Japanese characters"""
+    if not any(unicodedata.name(char).startswith('CJK UNIFIED') or 
+               unicodedata.name(char).startswith('HIRAGANA') or 
+               unicodedata.name(char).startswith('KATAKANA') 
+               for char in text):
+        raise ValueError("生成されたテキストに日本語が含まれていません")
+    return text
+
+def is_japanese_text(text):
+    """Check if text contains Japanese characters"""
+    japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
+    return bool(japanese_pattern.search(text))
+
 @lru_cache(maxsize=1)
 def load_models():
-    """Load models with improved performance"""
+    """Load models with Japanese support"""
     global summarizer, qa_model
     try:
         logger.info("Loading summarization model...")
-        model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
-        tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
-        
-        summarizer = {
-            "model": model,
-            "tokenizer": tokenizer
-        }
+        summarizer = pipeline(
+            "summarization",
+            model="facebook/mbart-large-cc25",
+            tokenizer="facebook/mbart-large-cc25",
+            device="cpu"
+        )
         
         logger.info("Loading QA model...")
         qa_model = pipeline("question-answering", 
@@ -73,11 +86,6 @@ def get_qa_model():
         load_models()
     return qa_model
 
-def is_japanese_text(text):
-    """Check if text contains Japanese characters"""
-    japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
-    return bool(japanese_pattern.search(text))
-
 def get_text_length(text):
     """Get appropriate text length considering Japanese characters"""
     if not text:
@@ -100,13 +108,44 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
+def split_into_sentences(text):
+    """Split text into sentences with Japanese-specific handling"""
+    if not text:
+        return []
+
+    # Japanese-specific sentence boundary pattern
+    pattern = r'([。．.!?！？\n]|[。．.!?！？]\s)'
+    
+    try:
+        sentences = []
+        current_sentence = ""
+        
+        for char in text:
+            current_sentence += char
+            if re.search(pattern, char):
+                if current_sentence.strip():
+                    sentences.append(current_sentence.strip())
+                current_sentence = ""
+        
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+            
+        return sentences
+    except Exception as e:
+        logger.warning(f"文章の分割に失敗: {str(e)}")
+        return [text.strip()]
+
 def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
-    """Create properly sized chunks with improved Japanese text handling"""
+    """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
     
+    # Validate Japanese content
+    if not is_japanese_text(text):
+        raise ValueError("日本語のテキストが含まれていません")
+    
     text = clean_text(text)
-    sentences = text.split('\n')
+    sentences = split_into_sentences(text)
     
     if not sentences:
         raise ValueError("テキストを文章に分割できませんでした")
@@ -127,25 +166,27 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
                 current_chunk = []
                 current_length = 0
             
-            # Split long sentence at logical Japanese boundaries
-            particles = r'(では|には|から|まで|として|による|について|という|との|への)'
+            # Split long sentences at Japanese-specific boundaries
+            particles = r'(では|には|から|まで|として|による|について|という|との|への|もの|こと|など|まま|ため)'
             sub_parts = re.split(particles, sentence)
             current_sub_part = []
             current_sub_length = 0
             
             for part in sub_parts:
+                if not part.strip():
+                    continue
                 part_length = get_text_length(part)
                 if current_sub_length + part_length <= max_chunk_size:
                     current_sub_part.append(part)
                     current_sub_length += part_length
                 else:
                     if current_sub_part:
-                        chunks.append(' '.join(current_sub_part))
+                        chunks.append(''.join(current_sub_part))
                     current_sub_part = [part]
                     current_sub_length = part_length
             
             if current_sub_part:
-                chunks.append(' '.join(current_sub_part))
+                chunks.append(''.join(current_sub_part))
             continue
         
         if current_length + sentence_length > max_chunk_size:
@@ -159,7 +200,6 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
     if current_chunk:
         chunks.append(' '.join(current_chunk))
     
-    # Validate chunk content and limit total chunks
     valid_chunks = [chunk for chunk in chunks if chunk.strip()]
     if len(valid_chunks) > max_chunks:
         logger.warning(f"チャンク数を {len(valid_chunks)} から {max_chunks} に削減します")
@@ -171,7 +211,7 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
     return valid_chunks
 
 def summarize_chunk(chunk, index, total_chunks, start_time):
-    """Summarize chunk with improved error handling and timeout"""
+    """Summarize chunk with Japanese language support"""
     if not chunk.strip():
         return ""
         
@@ -179,25 +219,26 @@ def summarize_chunk(chunk, index, total_chunks, start_time):
         # Check chunk timeout (8 seconds)
         if time.time() - start_time > 8:
             raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
-            
-        model_data = get_summarizer()
-        if not model_data or not isinstance(model_data, dict):
+        
+        model = get_summarizer()
+        if not model:
             raise ValueError("サマライザーの初期化に失敗しました")
-            
-        # Add proper tokenization for Japanese text
-        inputs = model_data["tokenizer"](chunk, truncation=True, max_length=1024, return_tensors="pt")
         
-        # Generate summary with faster parameters
-        summary_ids = model_data["model"].generate(
-            inputs["input_ids"],
-            max_length=100,
-            min_length=30,
-            length_penalty=1.5,
-            num_beams=2,
-            early_stopping=True
-        )
+        # Set Japanese as target language
+        inputs = {
+            "text": chunk,
+            "max_length": 100,
+            "min_length": 30,
+            "length_penalty": 1.5,
+            "num_beams": 2,
+            "early_stopping": True,
+            "forced_bos_token_id": model.tokenizer.lang_code_to_id["ja_XX"]
+        }
         
-        summary = model_data["tokenizer"].decode(summary_ids[0], skip_special_tokens=True)
+        summary = model(**inputs)[0]["summary_text"]
+        
+        # Validate Japanese output
+        summary = validate_japanese_output(summary)
         return summary.strip()
         
     except Exception as e:
@@ -205,14 +246,13 @@ def summarize_chunk(chunk, index, total_chunks, start_time):
         raise
 
 def summarize_text(text):
-    """Summarize text with improved error handling and retry mechanism"""
+    """Summarize text with improved Japanese handling"""
     try:
         if not text:
             raise ValueError("入力テキストが空です")
         
         update_progress(0, 100, "テキストを準備中...")
         
-        # Validate input text
         if len(text.strip()) < 10:
             raise ValueError("テキストが短すぎます")
         
@@ -222,8 +262,7 @@ def summarize_text(text):
         
         while current_retry <= max_retries:
             try:
-                # Adjust chunk size based on retry attempt
-                max_chunk_size = 1024 >> current_retry  # Reduce size on each retry
+                max_chunk_size = 1024 >> current_retry
                 chunks = create_chunks(text, max_chunk_size=max_chunk_size)
                 total_chunks = len(chunks)
                 
@@ -235,7 +274,6 @@ def summarize_text(text):
                 chunk_start_time = time.time()
                 
                 for i, chunk in enumerate(chunks):
-                    # Check total timeout (30 seconds)
                     if time.time() - start_time > 30:
                         raise TimeoutError("要約処理の制限時間を超えました")
                     
@@ -247,10 +285,11 @@ def summarize_text(text):
                     if summary:
                         summaries.append(summary)
                     update_progress(i + 1, total_chunks, f"チャンク {i + 1}/{total_chunks} を処理中...")
-                    chunk_start_time = time.time()  # Reset timer for next chunk
+                    chunk_start_time = time.time()
                 
                 if summaries:
                     final_summary = ' '.join(summaries)
+                    validate_japanese_output(final_summary)
                     update_progress(total_chunks, total_chunks, "要約が完了しました")
                     return final_summary
                 else:
