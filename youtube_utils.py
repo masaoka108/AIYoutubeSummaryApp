@@ -36,7 +36,7 @@ def get_cached_transcript(video_id):
             db.session.commit()
     return None
 
-def cache_transcript(video_id, transcript_text, language='ja'):
+def cache_transcript(video_id, transcript_text, language):
     """Cache transcript in database"""
     try:
         new_transcript = Transcript(
@@ -56,7 +56,7 @@ def get_transcript(video_id):
     cached_transcript = get_cached_transcript(video_id)
     if cached_transcript:
         logger.info(f"Transcript content for video {video_id} (cached):")
-        logger.info(cached_transcript[:500] + "..." if len(cached_transcript) > 500 else cached_transcript)
+        logger.info(cached_transcript)  # Show full cached transcript
         return cached_transcript
         
     try:
@@ -66,7 +66,7 @@ def get_transcript(video_id):
         
         # First try to get original language transcript
         try:
-            transcript = transcript_list.find_manually_created_transcript()
+            transcript = transcript_list.find_manually_created_transcript(['ja', 'en'])
             language = transcript.language_code
         except NoTranscriptFound:
             pass
@@ -74,20 +74,25 @@ def get_transcript(video_id):
         # If no manual transcript, try English or Japanese
         if not transcript:
             try:
-                transcript = transcript_list.find_generated_transcript(['en', 'ja'])
+                transcript = transcript_list.find_generated_transcript(['ja', 'en'])
                 language = transcript.language_code
             except NoTranscriptFound:
                 raise Exception("No suitable transcripts found")
 
         entries = transcript.fetch()
-        transcript_text = ' '.join(entry['text'] for entry in entries)
+        # Include timestamp information in transcript text
+        transcript_text = ' '.join(
+            f"{entry.get('text', '')} ({entry.get('start', '0')}s)" 
+            for entry in entries
+        )
         
-        # Add debug logging
+        # Log full transcript content
         logger.info(f"Transcript content for video {video_id}:")
-        logger.info(transcript_text[:500] + "..." if len(transcript_text) > 500 else transcript_text)
+        logger.info(transcript_text)  # Show full transcript
         
         # Cache the transcript
-        cache_transcript(video_id, transcript_text, language)
+        if language:
+            cache_transcript(video_id, transcript_text, language)
         return transcript_text
             
     except VideoUnavailable:
