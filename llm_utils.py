@@ -3,19 +3,18 @@ import threading
 import unicodedata
 import logging
 import time
-import torch
-from transformers import pipeline
+from openai import OpenAI
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variables for models and progress tracking
-summarizer = None
-qa_model = None
-summarization_progress = {"current": 0, "total": 0, "status": "idle"}
-processing_lock = threading.Lock()
+client = None
 models_loaded = threading.Event()
+processing_lock = threading.Lock()
+summarization_progress = {"current": 0, "total": 0, "status": "idle"}
 
 def get_progress():
     """Get current summarization progress"""
@@ -50,48 +49,28 @@ def is_japanese_text(text):
     return bool(japanese_pattern.search(text))
 
 def load_models_async():
-    """Load models asynchronously"""
-    global summarizer, qa_model
+    """Initialize OpenAI client"""
+    global client
     try:
-        logger.info("Loading summarization model...")
-        summarizer = pipeline(
-            "summarization",
-            model="facebook/bart-base",  # Smaller, faster model
-            device="cpu",
-            model_kwargs={"torch_dtype": torch.float32}
-        )
-        
-        logger.info("Loading QA model...")
-        qa_model = pipeline(
-            "question-answering",
-            model="distilbert-base-cased-distilled-squad",
-            device="cpu"
-        )
-        
+        client = OpenAI()
         models_loaded.set()
-        logger.info("Models loaded successfully")
-            
+        logger.info("OpenAI client initialized successfully")
     except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
+        logger.error(f"Error initializing OpenAI client: {str(e)}")
         raise
 
 def get_model():
-    """Get or initialize summarizer"""
-    global summarizer
-    if summarizer is None:
+    """Get or initialize OpenAI client"""
+    global client
+    if client is None:
         if not models_loaded.is_set():
             load_models_async()
-            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
-    return summarizer
+            models_loaded.wait(timeout=30)
+    return client
 
 def get_qa_model():
-    """Get or initialize QA model"""
-    global qa_model
-    if qa_model is None:
-        if not models_loaded.is_set():
-            load_models_async()
-            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
-    return qa_model
+    """Get or initialize QA model (uses same client)"""
+    return get_model()
 
 def clean_text(text):
     """Clean and validate text for summarization"""
@@ -103,7 +82,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=256, max_chunks=2):
+def create_chunks(text, max_chunk_size=2000, max_chunks=3):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -148,28 +127,33 @@ def create_chunks(text, max_chunk_size=256, max_chunks=2):
 
 def summarize_chunk(chunk, index, total_chunks):
     try:
-        model = get_model()
-        if not model:
+        client = get_model()
+        if not client:
             raise ValueError("モデルの初期化に失敗しました")
-            
-        # Reduce input length
-        if len(chunk) > 512:
-            chunk = chunk[:512]
-            
-        outputs = model(
-            chunk,
-            max_length=100,
-            min_length=30,
-            do_sample=False,
-            num_beams=2,
-            early_stopping=True
+        
+        # Create Japanese prompt
+        prompt = f"""以下の文章を要約してください。重要なポイントを3-5つにまとめて、
+箇条書きで出力してください：
+
+{chunk}"""
+        
+        messages = [
+            {"role": "system", "content": "あなたは優秀な文章要約者です。日本語で重要なポイントを箇条書きで要約してください。"},
+            {"role": "user", "content": prompt}
+        ]
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
         )
         
-        summary = outputs[0]['summary_text'].strip()
+        summary = response.choices[0].message.content.strip()
         if not summary:
             raise ValueError("空の要約が生成されました")
             
-        return summary
+        return validate_japanese_output(summary)
         
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
@@ -185,7 +169,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
             
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=256, max_chunks=2)
+        chunks = create_chunks(text, max_chunk_size=2000, max_chunks=3)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
@@ -221,19 +205,33 @@ def answer_question(question, context):
         if not question or not context:
             raise ValueError("質問とコンテキストは必須です")
             
-        model = get_qa_model()
-        if model is None:
+        client = get_qa_model()
+        if client is None:
             raise ValueError("QAモデルの初期化に失敗しました")
-            
-        answer = model(
-            question=question,
-            context=context
+        
+        messages = [
+            {"role": "system", "content": "あなたは優秀な質問回答者です。与えられた文脈に基づいて、質問に日本語で回答してください。"},
+            {"role": "user", "content": f"""以下の文章に基づいて、質問に答えてください。
+
+文章：
+{context}
+
+質問：
+{question}"""}
+        ]
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens=300,
+            temperature=0.7
         )
         
-        if not isinstance(answer, dict) or "answer" not in answer:
+        answer = response.choices[0].message.content.strip()
+        if not answer:
             raise ValueError("有効な回答を生成できませんでした")
             
-        return answer["answer"].strip()
+        return validate_japanese_output(answer)
         
     except Exception as e:
         logger.error(f"Question answering failed: {str(e)}")
