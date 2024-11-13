@@ -13,11 +13,11 @@ summarizer = None
 qa_model = None
 
 def load_models():
-    """Load models with basic summarization support"""
+    """Load models with Japanese summarization support"""
     global summarizer, qa_model
     try:
         logger.info("Loading summarization model...")
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+        summarizer = pipeline("summarization", model="facebook/mbart-large-cc25")
         
         logger.info("Loading QA model...")
         qa_model = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
@@ -74,8 +74,8 @@ def split_into_sentences(text):
     if not text:
         return []
 
-    # Enhanced pattern for Japanese and English sentence boundaries
-    pattern = r'([。．.!?！？\n]|\s{2,}|(?<=」)(?![\s。．.!?！？]))'
+    # Enhanced pattern for Japanese sentence boundaries
+    pattern = r'([。．.!?！？\n]|\s{2,}|(?<=」)(?![\s。．.!?！？])|(?<=）)(?![\s。．.!?！？]))'
     
     try:
         # Split text into sentences while preserving boundaries
@@ -87,17 +87,15 @@ def split_into_sentences(text):
             current = parts[i].strip()
             boundary = parts[i + 1] if i + 1 < len(parts) else ""
             
-            # Handle Japanese quotation marks and parentheses
             if current or boundary:
                 sentence = (current + boundary).strip()
                 if sentence:
-                    # Ensure proper handling of Japanese quotes
-                    if '「' in sentence and '」' not in sentence:
-                        # Continue collecting text until closing quote
+                    # Handle Japanese parentheses and quotes
+                    if ('「' in sentence and '」' not in sentence) or ('（' in sentence and '）' not in sentence):
                         continue_idx = i + 2
                         while continue_idx < len(parts):
                             sentence += parts[continue_idx]
-                            if '」' in parts[continue_idx]:
+                            if '」' in parts[continue_idx] or '）' in parts[continue_idx]:
                                 break
                             continue_idx += 1
                         i = continue_idx
@@ -113,55 +111,7 @@ def split_into_sentences(text):
         logger.warning(f"Failed to split text into sentences: {str(e)}")
         return [text.strip()] if text.strip() else []
 
-def truncate_to_size(text, target_size):
-    """Truncate text to target size with improved Japanese text handling"""
-    if not text:
-        return text
-        
-    current_length = get_text_length(text)
-    if current_length <= target_size:
-        return text
-        
-    try:
-        sentences = split_into_sentences(text)
-        result = []
-        current_length = 0
-        
-        # Try to include complete sentences
-        for sentence in sentences:
-            sentence_length = get_text_length(sentence)
-            if current_length + sentence_length <= target_size:
-                result.append(sentence)
-                current_length += sentence_length
-            else:
-                break
-        
-        if result:
-            return ''.join(result)
-        
-        # If no complete sentence fits, truncate carefully
-        first_sentence = sentences[0] if sentences else text
-        truncated = ''
-        current_length = 0
-        
-        # Handle Japanese characters properly
-        for char in first_sentence:
-            char_length = 2 if unicodedata.east_asian_width(char) in ['F', 'W'] else 1
-            if current_length + char_length > target_size:
-                # Try to find a proper break point
-                if char in '、。．.!?！？':
-                    truncated += char
-                break
-            truncated += char
-            current_length += char_length
-            
-        return truncated if truncated else text[:target_size]
-        
-    except Exception as e:
-        logger.warning(f"Failed to truncate text properly: {str(e)}")
-        return text[:target_size]
-
-def create_chunks(text, max_chunk_size=512, min_chunk_size=50):
+def create_chunks(text, max_chunk_size=256, min_chunk_size=50):
     """Create properly sized chunks with improved Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -224,16 +174,16 @@ def create_chunks(text, max_chunk_size=512, min_chunk_size=50):
     
     # Ensure we have at least one chunk
     if not chunks:
-        return [truncate_to_size(text, max_chunk_size)]
+        return [text[:max_chunk_size]]
     
     return chunks
 
-def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_length):
+def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=130, min_length=30):
     """Summarize chunk with improved Japanese text handling"""
     if not chunk or not chunk.strip():
         raise ValueError(f"チャンク {index + 1} が空です")
     
-    chunk_sizes = [512, 256, 128]
+    chunk_sizes = [256, 128, 64]
     model = get_summarizer()
     
     for chunk_size in chunk_sizes:
@@ -242,11 +192,7 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_lengt
             logger.info(f"Processing chunk {index + 1}/{total_chunks} (length: {current_length})")
             
             if current_length > chunk_size:
-                chunk = truncate_to_size(chunk, chunk_size)
-                if not chunk:
-                    logger.warning(f"Failed to truncate chunk {index + 1}")
-                    continue
-                
+                chunk = clean_text(chunk[:chunk_size])
                 current_length = get_text_length(chunk)
                 logger.info(f"Truncated chunk {index + 1} to length: {current_length}")
             
@@ -256,8 +202,7 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length, min_lengt
                     chunk,
                     max_length=max_length,
                     min_length=min_length,
-                    do_sample=False,
-                    forced_bos_token_id=model.tokenizer.lang_code_to_id["ja_XX"]
+                    do_sample=False
                 )
                 
                 if summary and isinstance(summary, list) and len(summary) > 0:
