@@ -3,6 +3,7 @@ import threading
 import unicodedata
 import logging
 import time
+import torch
 from transformers import pipeline
 
 # Configure logging
@@ -55,9 +56,9 @@ def load_models_async():
         logger.info("Loading summarization model...")
         summarizer = pipeline(
             "summarization",
-            model="facebook/mbart-large-cc25",
-            tokenizer="facebook/mbart-large-cc25",
-            device="cpu"
+            model="facebook/bart-base",  # Smaller, faster model
+            device="cpu",
+            model_kwargs={"torch_dtype": torch.float32}
         )
         
         logger.info("Loading QA model...")
@@ -102,7 +103,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def create_chunks(text, max_chunk_size=512, max_chunks=2):
+def create_chunks(text, max_chunk_size=256, max_chunks=2):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -146,55 +147,30 @@ def create_chunks(text, max_chunk_size=512, max_chunks=2):
     return valid_chunks
 
 def summarize_chunk(chunk, index, total_chunks):
-    chunk_start_time = time.time()
-    chunk_timeout = 10  # seconds per chunk
-    
     try:
-        if not chunk.strip():
-            return ""
-            
         model = get_model()
-        if model is None:
+        if not model:
             raise ValueError("モデルの初期化に失敗しました")
             
-        # Check chunk-level timeout
-        if time.time() - chunk_start_time > chunk_timeout:
-            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
+        # Reduce input length
+        if len(chunk) > 512:
+            chunk = chunk[:512]
             
-        # Handle Japanese text specifically
-        inputs = chunk
-        
-        # Add proper Japanese model parameters
         outputs = model(
-            inputs,
-            max_length=150,
+            chunk,
+            max_length=100,
             min_length=30,
-            forced_bos_token_id=model.tokenizer.lang_code_to_id["ja_XX"],
-            early_stopping=True,
-            no_repeat_ngram_size=3
+            do_sample=False,
+            num_beams=2,
+            early_stopping=True
         )
         
-        # Check chunk-level timeout again after model inference
-        if time.time() - chunk_start_time > chunk_timeout:
-            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
-            
-        # Properly handle model output
-        if isinstance(outputs, list) and outputs:
-            summary = outputs[0]["summary_text"]
-        else:
-            summary = outputs["summary_text"]
-            
-        summary = summary.strip()
-        
-        # Validate Japanese output
-        if not is_japanese_text(summary):
-            raise ValueError("生成されたテキストが日本語ではありません")
+        summary = outputs[0]['summary_text'].strip()
+        if not summary:
+            raise ValueError("空の要約が生成されました")
             
         return summary
         
-    except TimeoutError as e:
-        logger.error(f"Chunk timeout error: {str(e)}")
-        raise
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
         raise
@@ -209,7 +185,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
             
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=512, max_chunks=2)
+        chunks = create_chunks(text, max_chunk_size=256, max_chunks=2)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
@@ -254,7 +230,7 @@ def answer_question(question, context):
             context=context
         )
         
-        if not answer or not isinstance(answer, dict) or "answer" not in answer:
+        if not isinstance(answer, dict) or "answer" not in answer:
             raise ValueError("有効な回答を生成できませんでした")
             
         return answer["answer"].strip()
