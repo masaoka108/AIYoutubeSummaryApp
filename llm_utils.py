@@ -224,18 +224,8 @@ def summarize_chunk(chunk, index, total_chunks, start_time):
         if not model:
             raise ValueError("サマライザーの初期化に失敗しました")
         
-        # Set Japanese as target language
-        inputs = {
-            "text": chunk,
-            "max_length": 100,
-            "min_length": 30,
-            "length_penalty": 1.5,
-            "num_beams": 2,
-            "early_stopping": True,
-            "forced_bos_token_id": model.tokenizer.lang_code_to_id["ja_XX"]
-        }
-        
-        summary = model(**inputs)[0]["summary_text"]
+        # Use direct pipeline call with simplified parameters
+        summary = model(inputs=chunk, max_length=100, min_length=30, num_beams=2, early_stopping=True)[0]["summary_text"]
         
         # Validate Japanese output
         summary = validate_japanese_output(summary)
