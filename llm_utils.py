@@ -3,7 +3,7 @@ import threading
 import unicodedata
 import logging
 import time
-from openai import OpenAI
+import google.generativeai as genai
 import os
 
 # Configure logging
@@ -49,18 +49,19 @@ def is_japanese_text(text):
     return bool(japanese_pattern.search(text))
 
 def load_models_async():
-    """Initialize OpenAI client"""
+    """Initialize Gemini model"""
     global client
     try:
-        client = OpenAI()
+        genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
+        client = genai.GenerativeModel('gemini-pro')
         models_loaded.set()
-        logger.info("OpenAI client initialized successfully")
+        logger.info("Gemini model initialized successfully")
     except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {str(e)}")
+        logger.error(f"Error initializing Gemini model: {str(e)}")
         raise
 
 def get_model():
-    """Get or initialize OpenAI client"""
+    """Get or initialize Gemini model"""
     global client
     if client is None:
         if not models_loaded.is_set():
@@ -69,7 +70,7 @@ def get_model():
     return client
 
 def get_qa_model():
-    """Get or initialize QA model (uses same client)"""
+    """Get or initialize QA model (uses same model)"""
     return get_model()
 
 def clean_text(text):
@@ -127,29 +128,18 @@ def create_chunks(text, max_chunk_size=2000, max_chunks=3):
 
 def summarize_chunk(chunk, index, total_chunks):
     try:
-        client = get_model()
-        if not client:
+        model = get_model()
+        if not model:
             raise ValueError("モデルの初期化に失敗しました")
         
-        # Create Japanese prompt
-        prompt = f"""以下の文章を要約してください。重要なポイントを3-5つにまとめて、
+        prompt = f'''以下の文章を要約してください。重要なポイントを3-5つにまとめて、
 箇条書きで出力してください：
 
-{chunk}"""
+{chunk}'''
         
-        messages = [
-            {"role": "system", "content": "あなたは優秀な文章要約者です。日本語で重要なポイントを箇条書きで要約してください。"},
-            {"role": "user", "content": prompt}
-        ]
-
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            max_tokens=500,
-            temperature=0.7
-        )
+        response = model.generate_content(prompt)
         
-        summary = response.choices[0].message.content.strip()
+        summary = response.text.strip()
         if not summary:
             raise ValueError("空の要約が生成されました")
             
@@ -205,29 +195,21 @@ def answer_question(question, context):
         if not question or not context:
             raise ValueError("質問とコンテキストは必須です")
             
-        client = get_qa_model()
-        if client is None:
+        model = get_qa_model()
+        if model is None:
             raise ValueError("QAモデルの初期化に失敗しました")
         
-        messages = [
-            {"role": "system", "content": "あなたは優秀な質問回答者です。与えられた文脈に基づいて、質問に日本語で回答してください。"},
-            {"role": "user", "content": f"""以下の文章に基づいて、質問に答えてください。
+        prompt = f'''以下の文章に基づいて、質問に答えてください。
 
 文章：
 {context}
 
 質問：
-{question}"""}
-        ]
+{question}'''
         
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.7
-        )
+        response = model.generate_content(prompt)
+        answer = response.text.strip()
         
-        answer = response.choices[0].message.content.strip()
         if not answer:
             raise ValueError("有効な回答を生成できませんでした")
             
