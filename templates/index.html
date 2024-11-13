@@ -3,7 +3,7 @@
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-8 text-center">
-        <h1 class="mb-4">内容をまとめて欲しいYoutubeのURLを入力してください✨</h1>
+        <h1 class="mb-4">内容をまとめて欲しい<br/>YoutubeのURLを入力してください✨</h1>
         
         <form action="{{ url_for('summarize') }}" method="POST" class="mb-5">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
