@@ -16,6 +16,8 @@ summarizer = None
 qa_model = None
 summarization_progress = {"current": 0, "total": 0, "status": "idle"}
 processing_lock = threading.Lock()
+models_loading = False
+models_loaded = threading.Event()
 
 def get_progress():
     """Get current summarization progress"""
@@ -49,41 +51,54 @@ def is_japanese_text(text):
     japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
     return bool(japanese_pattern.search(text))
 
-@lru_cache(maxsize=1)
-def load_models():
-    """Load models with Japanese support"""
-    global summarizer, qa_model
-    try:
-        logger.info("Loading summarization model...")
-        summarizer = pipeline(
-            "summarization",
-            model="facebook/mbart-large-cc25",
-            tokenizer="facebook/mbart-large-cc25",
-            device="cpu"
-        )
-        
-        logger.info("Loading QA model...")
-        qa_model = pipeline("question-answering", 
-                          model="distilbert-base-cased-distilled-squad",
-                          device="cpu")
-        
-        logger.info("Models loaded successfully")
-    except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
-        raise
+def load_models_async():
+    """Load models asynchronously"""
+    global summarizer, qa_model, models_loading
+    
+    def load():
+        global summarizer, qa_model, models_loading
+        try:
+            logger.info("Loading summarization model...")
+            summarizer = pipeline(
+                "summarization",
+                model="facebook/mbart-large-cc25",
+                tokenizer="facebook/mbart-large-cc25",
+                device="cpu"
+            )
+            
+            logger.info("Loading QA model...")
+            qa_model = pipeline("question-answering", 
+                              model="distilbert-base-cased-distilled-squad",
+                              device="cpu")
+            
+            logger.info("Models loaded successfully")
+            models_loaded.set()
+        except Exception as e:
+            logger.error(f"Error loading models: {str(e)}")
+        finally:
+            models_loading = False
+    
+    if not models_loading and not models_loaded.is_set():
+        models_loading = True
+        thread = threading.Thread(target=load, daemon=True)
+        thread.start()
 
 def get_summarizer():
     """Get or initialize summarizer"""
     global summarizer
     if summarizer is None:
-        load_models()
+        if not models_loaded.is_set():
+            load_models_async()
+            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
     return summarizer
 
 def get_qa_model():
     """Get or initialize QA model"""
     global qa_model
     if qa_model is None:
-        load_models()
+        if not models_loaded.is_set():
+            load_models_async()
+            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
     return qa_model
 
 def get_text_length(text):
@@ -113,7 +128,6 @@ def split_into_sentences(text):
     if not text:
         return []
 
-    # Japanese-specific sentence boundary pattern
     pattern = r'([。．.!?！？\n]|[。．.!?！？]\s)'
     
     try:
@@ -140,7 +154,6 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
     if not text:
         raise ValueError("入力テキストが空です")
     
-    # Validate Japanese content
     if not is_japanese_text(text):
         raise ValueError("日本語のテキストが含まれていません")
     
@@ -166,7 +179,6 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
                 current_chunk = []
                 current_length = 0
             
-            # Split long sentences at Japanese-specific boundaries
             particles = r'(では|には|から|まで|として|による|について|という|との|への|もの|こと|など|まま|ため)'
             sub_parts = re.split(particles, sentence)
             current_sub_part = []
@@ -216,7 +228,6 @@ def summarize_chunk(chunk, index, total_chunks, start_time):
         return ""
         
     try:
-        # Check chunk timeout (8 seconds)
         if time.time() - start_time > 8:
             raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
         
@@ -224,12 +235,26 @@ def summarize_chunk(chunk, index, total_chunks, start_time):
         if not model:
             raise ValueError("サマライザーの初期化に失敗しました")
         
-        # Use direct pipeline call with simplified parameters
-        summary = model(inputs=chunk, max_length=100, min_length=30, num_beams=2, early_stopping=True)[0]["summary_text"]
+        # Fix the pipeline call to handle the output correctly
+        summary_output = model(
+            chunk,
+            max_length=100,
+            min_length=30,
+            num_beams=2,
+            early_stopping=True,
+            do_sample=False
+        )
+        
+        if not summary_output or not isinstance(summary_output, list):
+            raise ValueError("無効な要約出力です")
+            
+        summary = summary_output[0].get('summary_text', '').strip()
+        if not summary:
+            raise ValueError("空の要約が生成されました")
         
         # Validate Japanese output
         summary = validate_japanese_output(summary)
-        return summary.strip()
+        return summary
         
     except Exception as e:
         logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
@@ -325,5 +350,5 @@ def answer_question(question, context):
         logger.error(f"質問応答に失敗: {str(e)}")
         raise Exception(f"質問応答に失敗しました: {str(e)}")
 
-# Initialize models on import
-load_models()
+# Initialize models loading on import
+load_models_async()
