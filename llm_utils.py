@@ -3,6 +3,7 @@ import threading
 import unicodedata
 import logging
 import time
+from transformers import pipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,32 +52,43 @@ def load_models_async():
     """Load models asynchronously"""
     global summarizer, qa_model
     try:
-        import ollama
-        
-        # Initialize Ollama models
-        summarizer = ollama.Client()
-        qa_model = summarizer  # Use same client for both
-        
-        # Test model availability
-        response = summarizer.chat(
-            model="llama2-japanese",
-            messages=[{"role": "user", "content": "テスト"}]
+        logger.info("Loading summarization model...")
+        summarizer = pipeline(
+            "summarization",
+            model="facebook/bart-large-cnn",
+            device="cpu"
         )
         
-        if response:
-            models_loaded.set()
-            logger.info("Ollama models loaded successfully")
+        logger.info("Loading QA model...")
+        qa_model = pipeline(
+            "question-answering",
+            model="distilbert-base-cased-distilled-squad",
+            device="cpu"
+        )
+        
+        models_loaded.set()
+        logger.info("Models loaded successfully")
             
     except Exception as e:
-        logger.error(f"Error loading Ollama models: {str(e)}")
+        logger.error(f"Error loading models: {str(e)}")
 
 def get_model():
-    """Get or initialize model"""
+    """Get or initialize summarizer"""
     global summarizer
     if summarizer is None:
-        load_models_async()
-        models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
+        if not models_loaded.is_set():
+            load_models_async()
+            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
     return summarizer
+
+def get_qa_model():
+    """Get or initialize QA model"""
+    global qa_model
+    if qa_model is None:
+        if not models_loaded.is_set():
+            load_models_async()
+            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
+    return qa_model
 
 def clean_text(text):
     """Clean and validate text for summarization"""
@@ -132,17 +144,17 @@ def create_chunks(text, max_chunk_size=512, max_chunks=3):
     return valid_chunks
 
 def summarize_chunk(chunk, index, total_chunks):
-    """Summarize chunk with Japanese language support"""
     try:
         model = get_model()
-        response = model.chat(
-            model="llama2-japanese",
-            messages=[
-                {"role": "system", "content": "あなたは要約を生成する日本語のAIアシスタントです。"},
-                {"role": "user", "content": f"以下の文章を要約してください：{chunk}"}
-            ]
-        )
-        return response['message']['content']
+        summary = model(
+            chunk,
+            max_length=150,
+            min_length=40,
+            do_sample=False
+        )[0]["summary_text"]
+        
+        return summary.strip()
+        
     except Exception as e:
         logger.error(f"Chunk {index + 1} summarization failed: {str(e)}")
         raise
@@ -179,28 +191,18 @@ def summarize_text(text):
         raise
 
 def answer_question(question, context):
-    """Answer a question based on the context"""
-    if not question or not context:
-        raise ValueError("質問とコンテキストは空であってはいけません")
-    
     try:
-        model = get_model()
-        response = model.chat(
-            model="llama2-japanese",
-            messages=[
-                {"role": "system", "content": "あなたは質問に回答する日本語のAIアシスタントです。"},
-                {"role": "user", "content": f"以下のコンテキストに基づいて質問に答えてください:\nコンテキスト: {context}\n質問: {question}"}
-            ]
-        )
+        model = get_qa_model()
+        answer = model(
+            question=question,
+            context=context
+        )["answer"]
         
-        if not response or 'message' not in response or 'content' not in response['message']:
-            raise ValueError("無効な応答結果です")
-        
-        return response['message']['content']
+        return answer.strip()
         
     except Exception as e:
-        logger.error(f"質問応答に失敗: {str(e)}")
-        raise Exception(f"質問応答に失敗しました: {str(e)}")
+        logger.error(f"Question answering failed: {str(e)}")
+        raise
 
 # Initialize models loading on import
 load_models_async()
