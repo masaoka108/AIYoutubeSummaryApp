@@ -8,7 +8,20 @@
             <div class="card-body">
                 <h5 class="card-title">{{ video.title }}</h5>
                 <h6 class="mt-4">以下、要約した内容です</h6>
-                <p class="card-text">{{ summary }}</p>
+                <div class="card-text markdown-content" id="summary-content">{{ summary }}</div>
+                
+                <script>
+                    document.addEventListener('DOMContentLoaded', function() {
+                        const summaryContent = document.getElementById('summary-content');
+                        if (summaryContent) {
+                            const text = summaryContent.textContent;
+                            summaryContent.innerHTML = marked.parse(text, {
+                                breaks: true,
+                                gfm: true
+                            });
+                        }
+                    });
+                </script>
             </div>
         </div>
 
@@ -23,7 +36,7 @@
 
                 <div id="answer-section" class="mt-4" style="display: none;">
                     <div class="card bg-light">
-                        <div class="card-body" id="answer-text"></div>
+                        <div class="card-body markdown-content" id="answer-text"></div>
                     </div>
                 </div>
             </div>

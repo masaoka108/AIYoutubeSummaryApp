@@ -52,53 +52,37 @@ def cache_transcript(video_id, transcript_text, language='ja'):
         logger.warning(f"Transcript for video {video_id} already exists")
 
 def get_transcript(video_id):
-    """Get transcript with caching"""
-    # Try to get from cache first
+    """Get transcript with improved language support and caching"""
     cached_transcript = get_cached_transcript(video_id)
     if cached_transcript:
         return cached_transcript
         
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Try manual captions first
-        preferred_languages = ['ja', 'ja-JP', 'en', 'en-US']
         transcript = None
-        language = 'ja'
+        language = None
         
-        # Try to find manual transcripts in preferred languages
-        for lang in preferred_languages:
-            try:
-                transcript = transcript_list.find_manually_created_transcript([lang])
-                language = lang
-                break
-            except NoTranscriptFound:
-                continue
-        
-        # If no manual transcript found, try auto-generated
+        # First try to get original language transcript
+        try:
+            transcript = transcript_list.find_manually_created_transcript()
+            language = transcript.language_code
+        except NoTranscriptFound:
+            pass
+            
+        # If no manual transcript, try English or Japanese
         if not transcript:
             try:
-                transcript = transcript_list.find_generated_transcript(['ja', 'en'])
+                transcript = transcript_list.find_generated_transcript(['en', 'ja'])
                 language = transcript.language_code
             except NoTranscriptFound:
-                try:
-                    transcript = transcript_list.find_generated_transcript(['ja', 'en'])
-                    language = transcript.language_code
-                except NoTranscriptFound:
-                    raise Exception("字幕が見つかりませんでした")
+                raise Exception("No suitable transcripts found")
 
-        # Fetch and process transcript
-        if transcript:
-            entries = transcript.fetch()
-            transcript_text = ' '.join(entry['text'] for entry in entries)
-            logger.info(f"Fetched transcript (excerpt): {transcript_text[:200]}...")
-            
-            # Cache the transcript
-            cache_transcript(video_id, transcript_text, language)
-            
-            return transcript_text
-        else:
-            raise Exception("字幕が見つかりませんでした")
+        entries = transcript.fetch()
+        transcript_text = ' '.join(entry['text'] for entry in entries)
+        
+        # Cache the transcript
+        cache_transcript(video_id, transcript_text, language)
+        return transcript_text
             
     except VideoUnavailable:
         raise Exception("動画が非公開または削除されています")

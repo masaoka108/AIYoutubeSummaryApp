@@ -34,19 +34,20 @@ def update_progress(current, total, status="processing"):
         summarization_progress["status"] = status
         logger.info(f"Progress: {current}/{total} - {status}")
 
-def validate_japanese_output(text):
-    """Validate if the text contains Japanese characters"""
-    if not any(unicodedata.name(char).startswith('CJK UNIFIED') or 
-               unicodedata.name(char).startswith('HIRAGANA') or 
-               unicodedata.name(char).startswith('KATAKANA') 
-               for char in text):
-        raise ValueError("生成されたテキストが日本語ではありません")
-    return text
-
 def is_japanese_text(text):
     """Check if text contains Japanese characters"""
     japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
     return bool(japanese_pattern.search(text))
+
+def validate_japanese_output(text):
+    """Validate if the text contains Japanese characters when required"""
+    if is_japanese_text(text):
+        if not any(unicodedata.name(char).startswith('CJK UNIFIED') or 
+                   unicodedata.name(char).startswith('HIRAGANA') or 
+                   unicodedata.name(char).startswith('KATAKANA') 
+                   for char in text):
+            raise ValueError("Generated text is not in Japanese")
+    return text
 
 def load_models_async():
     """Initialize Gemini model"""
@@ -84,12 +85,9 @@ def clean_text(text):
     return text.strip()
 
 def create_chunks(text, max_chunk_size=2000, max_chunks=3):
-    """Create properly sized chunks with Japanese text handling"""
+    """Create properly sized chunks with language detection"""
     if not text:
         raise ValueError("入力テキストが空です")
-    
-    if not is_japanese_text(text):
-        raise ValueError("日本語のテキストが含まれていません")
     
     text = clean_text(text)
     sentences = text.split('\n')
@@ -130,27 +128,48 @@ def summarize_chunk(chunk, index, total_chunks):
     try:
         model = get_model()
         if not model:
-            raise ValueError("モデルの初期化に失敗しました")
+            raise ValueError("Model initialization failed")
         
-        prompt = f'''以下の文章を要約してください。重要なポイントを3-5つにまとめて、
-箇条書きで出力してください：
+        # Detect language
+        is_jp = is_japanese_text(chunk)
+        
+        prompt = '''Please summarize the following text into 3-5 key points:
+
+# Summary
+
+- Key point 1
+
+- Key point 2
+
+- Key point 3
+
+{chunk}''' if not is_jp else '''以下の文章を要約してください。
+重要なポイントを3-5つにまとめて、以下のような形式で出力してください：
+
+# 要約
+
+- 重要ポイント1
+
+- 重要ポイント2
+
+- 重要ポイント3
 
 {chunk}'''
         
         response = model.generate_content(prompt)
-        
         summary = response.text.strip()
+        
         if not summary:
-            raise ValueError("空の要約が生成されました")
+            raise ValueError("Empty summary generated")
             
-        return validate_japanese_output(summary)
+        return summary if not is_jp else validate_japanese_output(summary)
         
     except Exception as e:
-        logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
+        logger.error(f"Chunk {index + 1} summarization failed: {str(e)}")
         raise
 
 def summarize_text(text):
-    """Summarize text with improved Japanese handling"""
+    """Summarize text with improved language handling"""
     start_time = time.time()
     max_processing_time = 25  # seconds
     
@@ -159,7 +178,7 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
             
         update_progress(0, 100, "テキストを準備中...")
-        chunks = create_chunks(text, max_chunk_size=2000, max_chunks=3)
+        chunks = create_chunks(text)
         total_chunks = len(chunks)
         
         update_progress(0, total_chunks, "要約処理を開始します...")
@@ -181,7 +200,7 @@ def summarize_text(text):
         if not summaries:
             raise ValueError("要約を生成できませんでした")
             
-        return ' '.join(summaries)
+        return '\n\n'.join(summaries)
         
     except TimeoutError as e:
         logger.error(f"Timeout error: {str(e)}")
@@ -199,12 +218,20 @@ def answer_question(question, context):
         if model is None:
             raise ValueError("QAモデルの初期化に失敗しました")
         
+        # Detect language and use appropriate prompt
+        is_jp = is_japanese_text(question)
         prompt = f'''以下の文章に基づいて、質問に答えてください。
 
 文章：
 {context}
 
 質問：
+{question}''' if is_jp else f'''Based on the following text, please answer the question.
+
+Text:
+{context}
+
+Question:
 {question}'''
         
         response = model.generate_content(prompt)
@@ -213,7 +240,7 @@ def answer_question(question, context):
         if not answer:
             raise ValueError("有効な回答を生成できませんでした")
             
-        return validate_japanese_output(answer)
+        return answer
         
     except Exception as e:
         logger.error(f"Question answering failed: {str(e)}")

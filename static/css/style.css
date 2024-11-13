@@ -55,3 +55,28 @@ body {
     80% { content: "...."; }
     100% { content: "....."; }
 }
+
+.markdown-content {
+    line-height: 1.8;
+    padding: 1.5rem;
+    white-space: pre-line;
+}
+
+.markdown-content h1 {
+    font-size: 1.75rem;
+    margin: 1.5rem 0;
+    color: #333;
+}
+
+.markdown-content ul {
+    padding-left: 1.5rem;
+    margin: 1rem 0;
+}
+
+.markdown-content li {
+    margin: 1rem 0;
+}
+
+.markdown-content p {
+    margin: 1rem 0;
+}
