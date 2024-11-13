@@ -6,6 +6,7 @@ import requests
 import logging
 from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
+from models import db, Transcript
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +24,6 @@ def extract_video_id(url):
 
 def get_cached_transcript(video_id):
     """Get transcript from cache if it exists"""
-    from app import db
-    from models import Transcript
-    
     cached = Transcript.query.filter_by(video_id=video_id).first()
     if cached:
         # Check if cache is less than 24 hours old
@@ -40,9 +38,6 @@ def get_cached_transcript(video_id):
 
 def cache_transcript(video_id, transcript_text, language='ja'):
     """Cache transcript in database"""
-    from app import db
-    from models import Transcript
-    
     try:
         new_transcript = Transcript(
             video_id=video_id,
@@ -87,7 +82,7 @@ def get_transcript(video_id):
                 language = transcript.language_code
             except NoTranscriptFound:
                 try:
-                    transcript = transcript_list.find_generated_transcript()
+                    transcript = transcript_list.find_generated_transcript(['ja', 'en'])
                     language = transcript.language_code
                 except NoTranscriptFound:
                     raise Exception("字幕が見つかりませんでした")

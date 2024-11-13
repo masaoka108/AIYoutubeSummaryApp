@@ -1,18 +1,13 @@
 import os
 from flask import Flask, render_template, request, jsonify, flash
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.orm import DeclarativeBase
+from flask_wtf.csrf import CSRFProtect
 from youtube_utils import get_video_info, extract_video_id
 from llm_utils import summarize_text, answer_question, get_progress
-from flask_wtf.csrf import CSRFProtect
 import threading
 import queue
 import time
+from models import db, Summary, Question
 
-class Base(DeclarativeBase):
-    pass
-
-db = SQLAlchemy(model_class=Base)
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev_key_123"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///youtube_summary.db"
@@ -28,7 +23,6 @@ def process_video_summary(video_id, video_info):
     try:
         summary = summarize_text(video_info['transcript'])
         
-        from models import Summary
         with app.app_context():
             new_summary = Summary(video_id=video_id, summary=summary)
             db.session.add(new_summary)
@@ -143,7 +137,6 @@ def ask():
         video_info = get_video_info(video_id)
         answer = answer_question(question, video_info['transcript'])
         
-        from models import Question
         new_question = Question(video_id=video_id, question=question, answer=answer)
         db.session.add(new_question)
         db.session.commit()
@@ -160,7 +153,6 @@ def method_not_allowed(e):
     return jsonify({'error': '無効なリクエストメソッドです'}), 405
 
 with app.app_context():
-    import models
     db.create_all()
 
 if __name__ == "__main__":
