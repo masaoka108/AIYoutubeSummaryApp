@@ -106,14 +106,6 @@ def split_into_sentences(text):
             if current or boundary:
                 sentence = (current + boundary).strip()
                 if sentence:
-                    if ('「' in sentence and '」' not in sentence) or ('（' in sentence and '）' not in sentence):
-                        continue_idx = i + 2
-                        while continue_idx < len(parts):
-                            sentence += parts[continue_idx]
-                            if '」' in parts[continue_idx] or '）' in parts[continue_idx]:
-                                break
-                            continue_idx += 1
-                        i = continue_idx
                     sentences.append(sentence)
             i += 2
         
@@ -123,19 +115,47 @@ def split_into_sentences(text):
         logger.warning(f"Failed to split text into sentences: {str(e)}")
         return [text.strip()] if text.strip() else []
 
-def create_chunks(text, max_chunk_size=128, min_chunk_size=30):
+def merge_short_chunks(chunks, max_chunk_size=512):
+    """Merge short chunks to reduce total number of chunks"""
+    if not chunks:
+        return chunks
+        
+    merged = []
+    current = chunks[0]
+    current_length = get_text_length(current)
+    
+    for chunk in chunks[1:]:
+        chunk_length = get_text_length(chunk)
+        if current_length + chunk_length <= max_chunk_size:
+            current += ' ' + chunk
+            current_length += chunk_length
+        else:
+            merged.append(current)
+            current = chunk
+            current_length = chunk_length
+    
+    merged.append(current)
+    return merged
+
+def create_chunks(text, max_chunk_size=512, min_chunk_size=100, max_chunks=20):
     """Create properly sized chunks with improved Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
     
+    start_time = time.time()
     text = clean_text(text)
-    chunks = []
     sentences = split_into_sentences(text)
     
+    chunks = []
     current_chunk = []
     current_length = 0
     
     for sentence in sentences:
+        # Check chunking timeout
+        if time.time() - start_time > 5:
+            logger.warning("Chunking timeout reached")
+            break
+            
         sentence_length = get_text_length(sentence)
         
         if sentence_length > max_chunk_size:
@@ -144,6 +164,7 @@ def create_chunks(text, max_chunk_size=128, min_chunk_size=30):
                 current_chunk = []
                 current_length = 0
             
+            # Split long sentence at logical points
             sub_parts = re.split(r'(で|に|を|は|が|の|、|。)', sentence)
             current_sub_part = []
             current_sub_length = 0
@@ -164,8 +185,7 @@ def create_chunks(text, max_chunk_size=128, min_chunk_size=30):
             continue
         
         if current_length + sentence_length > max_chunk_size:
-            if current_chunk:
-                chunks.append(''.join(current_chunk))
+            chunks.append(''.join(current_chunk))
             current_chunk = [sentence]
             current_length = sentence_length
         else:
@@ -175,18 +195,29 @@ def create_chunks(text, max_chunk_size=128, min_chunk_size=30):
     if current_chunk:
         chunks.append(''.join(current_chunk))
     
+    # Merge short chunks and limit total chunks
+    chunks = merge_short_chunks(chunks, max_chunk_size)
+    if len(chunks) > max_chunks:
+        logger.warning(f"Reducing chunks from {len(chunks)} to {max_chunks}")
+        chunks = chunks[:max_chunks]
+    
     return chunks if chunks else [text[:max_chunk_size]]
 
-def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=100, min_length=30):
-    """Summarize chunk with improved Japanese text handling"""
+def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=150, min_length=50):
+    """Summarize chunk with improved Japanese text handling and timeout"""
     if not chunk or not chunk.strip():
         raise ValueError(f"チャンク {index + 1} が空です")
     
-    chunk_sizes = [128, 64, 32]
+    chunk_sizes = [512, 256]  # Reduced retry attempts to 2
     model = get_summarizer()
+    start_time = time.time()
     
     for chunk_size in chunk_sizes:
         try:
+            # Check chunk timeout
+            if time.time() - start_time > 8:
+                raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
+                
             current_length = get_text_length(chunk)
             logger.info(f"Processing chunk {index + 1}/{total_chunks} (length: {current_length})")
             
@@ -200,7 +231,8 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=100, min_l
                     chunk,
                     max_length=max_length,
                     min_length=min_length,
-                    do_sample=False
+                    do_sample=False,
+                    num_beams=2  # Faster beam search
                 )
                 
                 if summary and isinstance(summary, list) and len(summary) > 0:
@@ -208,11 +240,16 @@ def summarize_chunk_with_retry(chunk, index, total_chunks, max_length=100, min_l
                     if summary_text:
                         logger.info(f"Successfully summarized chunk {index + 1}/{total_chunks}")
                         return summary_text
+                        
             except Exception as e:
                 logger.warning(f"Summarization error in chunk {index + 1}: {str(e)}")
+                if chunk_size == chunk_sizes[-1]:
+                    raise
                 continue
             
         except Exception as e:
+            if isinstance(e, TimeoutError):
+                raise
             logger.warning(f"Failed to process chunk {index + 1} with size {chunk_size}: {str(e)}")
             if chunk_size == chunk_sizes[-1]:
                 raise ValueError(f"チャンク {index + 1} の要約に失敗しました: {str(e)}")
@@ -228,7 +265,7 @@ def summarize_text(text):
         
         update_progress(0, 100, "準備中...")
         text = clean_text(text)
-        chunks = create_chunks(text)
+        chunks = create_chunks(text)  # Using default max_chunks=20
         total_chunks = len(chunks)
         logger.info(f"Created {total_chunks} chunks for summarization")
         
@@ -238,6 +275,7 @@ def summarize_text(text):
         
         for i, chunk in enumerate(chunks):
             try:
+                # Check total timeout
                 if time.time() - start_time > 30:
                     raise TimeoutError("要約処理がタイムアウトしました")
                 
@@ -248,6 +286,8 @@ def summarize_text(text):
                 
             except Exception as e:
                 logger.error(f"Failed to summarize chunk {i + 1}: {str(e)}")
+                # Cleanup on error
+                update_progress(0, 0, f"エラー: {str(e)}")
                 raise
         
         if not summaries:
@@ -258,6 +298,7 @@ def summarize_text(text):
         return final_summary
         
     except Exception as e:
+        # Ensure proper cleanup
         update_progress(0, 0, f"エラー: {str(e)}")
         logger.error(f"Summarization failed: {str(e)}")
         raise Exception(f"テキストの要約に失敗しました: {str(e)}")
