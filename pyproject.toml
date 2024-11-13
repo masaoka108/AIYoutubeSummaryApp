@@ -18,4 +18,5 @@ dependencies = [
     "unidic-lite",
     "langdetect",
     "flask-wtf>=1.2.2",
+    "ollama>=0.3.3",
 ]

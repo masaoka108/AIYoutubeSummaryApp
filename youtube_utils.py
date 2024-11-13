@@ -19,62 +19,49 @@ def extract_video_id(url):
             return parse_qs(parsed.query)['v'][0]
     return None
 
-def get_available_transcripts(video_id):
-    """Get list of available transcripts for the video"""
+def get_transcript(video_id):
+    """Get transcript with logging"""
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        return transcript_list
-    except Exception as e:
-        logger.error(f"Error getting transcript list: {str(e)}")
-        return None
-
-def get_transcript(video_id):
-    """Get transcript with fallback options"""
-    try:
-        transcript_list = get_available_transcripts(video_id)
-        if not transcript_list:
-            raise TranscriptsDisabled()
-
+        
         # Try manual captions first
         preferred_languages = ['ja', 'ja-JP', 'en', 'en-US']
-        manual_transcript = None
+        transcript = None
         
         # Try to find manual transcripts in preferred languages
         for lang in preferred_languages:
             try:
                 transcript = transcript_list.find_manually_created_transcript([lang])
-                manual_transcript = transcript
                 break
             except NoTranscriptFound:
                 continue
-
-        # If manual transcript found, return it
-        if manual_transcript:
-            return manual_transcript.fetch()
-
-        # Try auto-generated captions as fallback
-        try:
-            auto_transcript = transcript_list.find_generated_transcript(['ja', 'en'])
-            return auto_transcript.fetch()
-        except NoTranscriptFound:
-            # Try any available auto-generated transcript
+        
+        # If no manual transcript found, try auto-generated
+        if not transcript:
             try:
-                auto_transcript = transcript_list.find_generated_transcript()
-                return auto_transcript.fetch()
+                transcript = transcript_list.find_generated_transcript(['ja', 'en'])
             except NoTranscriptFound:
-                raise Exception("字幕が見つかりませんでした（手動・自動生成共に利用できません）")
+                try:
+                    transcript = transcript_list.find_generated_transcript()
+                except NoTranscriptFound:
+                    raise Exception("字幕が見つかりませんでした")
 
+        # Fetch and process transcript
+        if transcript:
+            entries = transcript.fetch()
+            transcript_text = ' '.join(entry['text'] for entry in entries)
+            logger.info(f"Fetched transcript (excerpt): {transcript_text[:200]}...")
+            return transcript_text
+        else:
+            raise Exception("字幕が見つかりませんでした")
+            
     except VideoUnavailable:
         raise Exception("動画が非公開または削除されています")
     except TranscriptsDisabled:
         raise Exception("この動画では字幕が無効になっています")
     except Exception as e:
-        if "too many requests" in str(e).lower():
-            raise Exception("アクセス制限により字幕を取得できません。しばらく待ってから再試行してください")
-        elif "region" in str(e).lower():
-            raise Exception("この動画は地域制限により利用できません")
-        else:
-            raise Exception(f"字幕の取得に失敗しました: {str(e)}")
+        logger.error(f"Transcript fetch error: {str(e)}")
+        raise
 
 def get_video_info(video_id):
     """Get video information including transcript"""
@@ -100,8 +87,7 @@ def get_video_info(video_id):
             raise Exception("この動画は非公開です")
         
         # Get transcript
-        transcript = get_transcript(video_id)
-        transcript_text = ' '.join([entry['text'] for entry in transcript])
+        transcript_text = get_transcript(video_id)
         
         return {
             'id': video_id,

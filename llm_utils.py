@@ -3,9 +3,6 @@ import threading
 import unicodedata
 import logging
 import time
-import torch
-from transformers import pipeline, MBartTokenizer, MBartForConditionalGeneration
-from functools import lru_cache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +13,6 @@ summarizer = None
 qa_model = None
 summarization_progress = {"current": 0, "total": 0, "status": "idle"}
 processing_lock = threading.Lock()
-models_loading = False
 models_loaded = threading.Event()
 
 def get_progress():
@@ -53,65 +49,34 @@ def is_japanese_text(text):
 
 def load_models_async():
     """Load models asynchronously"""
-    global summarizer, qa_model, models_loading
-    
-    def load():
-        global summarizer, qa_model, models_loading
-        try:
-            logger.info("Loading summarization model...")
-            summarizer = pipeline(
-                "summarization",
-                model="facebook/mbart-large-cc25",
-                tokenizer="facebook/mbart-large-cc25",
-                device="cpu"
-            )
-            
-            logger.info("Loading QA model...")
-            qa_model = pipeline("question-answering", 
-                              model="distilbert-base-cased-distilled-squad",
-                              device="cpu")
-            
-            logger.info("Models loaded successfully")
+    global summarizer, qa_model
+    try:
+        import ollama
+        
+        # Initialize Ollama models
+        summarizer = ollama.Client()
+        qa_model = summarizer  # Use same client for both
+        
+        # Test model availability
+        response = summarizer.chat(
+            model="llama2-japanese",
+            messages=[{"role": "user", "content": "テスト"}]
+        )
+        
+        if response:
             models_loaded.set()
-        except Exception as e:
-            logger.error(f"Error loading models: {str(e)}")
-        finally:
-            models_loading = False
-    
-    if not models_loading and not models_loaded.is_set():
-        models_loading = True
-        thread = threading.Thread(target=load, daemon=True)
-        thread.start()
+            logger.info("Ollama models loaded successfully")
+            
+    except Exception as e:
+        logger.error(f"Error loading Ollama models: {str(e)}")
 
-def get_summarizer():
-    """Get or initialize summarizer"""
+def get_model():
+    """Get or initialize model"""
     global summarizer
     if summarizer is None:
-        if not models_loaded.is_set():
-            load_models_async()
-            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
+        load_models_async()
+        models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
     return summarizer
-
-def get_qa_model():
-    """Get or initialize QA model"""
-    global qa_model
-    if qa_model is None:
-        if not models_loaded.is_set():
-            load_models_async()
-            models_loaded.wait(timeout=30)  # Wait up to 30 seconds for models to load
-    return qa_model
-
-def get_text_length(text):
-    """Get appropriate text length considering Japanese characters"""
-    if not text:
-        return 0
-    length = 0
-    for char in text:
-        if unicodedata.east_asian_width(char) in ['F', 'W']:
-            length += 2
-        else:
-            length += 1
-    return length
 
 def clean_text(text):
     """Clean and validate text for summarization"""
@@ -123,33 +88,7 @@ def clean_text(text):
     text = re.sub(r'([。．.!?！？])\s*', r'\1\n', text)
     return text.strip()
 
-def split_into_sentences(text):
-    """Split text into sentences with Japanese-specific handling"""
-    if not text:
-        return []
-
-    pattern = r'([。．.!?！？\n]|[。．.!?！？]\s)'
-    
-    try:
-        sentences = []
-        current_sentence = ""
-        
-        for char in text:
-            current_sentence += char
-            if re.search(pattern, char):
-                if current_sentence.strip():
-                    sentences.append(current_sentence.strip())
-                current_sentence = ""
-        
-        if current_sentence.strip():
-            sentences.append(current_sentence.strip())
-            
-        return sentences
-    except Exception as e:
-        logger.warning(f"文章の分割に失敗: {str(e)}")
-        return [text.strip()]
-
-def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
+def create_chunks(text, max_chunk_size=512, max_chunks=3):
     """Create properly sized chunks with Japanese text handling"""
     if not text:
         raise ValueError("入力テキストが空です")
@@ -158,10 +97,7 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
         raise ValueError("日本語のテキストが含まれていません")
     
     text = clean_text(text)
-    sentences = split_into_sentences(text)
-    
-    if not sentences:
-        raise ValueError("テキストを文章に分割できませんでした")
+    sentences = text.split('\n')
     
     chunks = []
     current_chunk = []
@@ -171,38 +107,11 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
         if not sentence.strip():
             continue
             
-        sentence_length = get_text_length(sentence)
-        
-        if sentence_length > max_chunk_size:
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-                current_chunk = []
-                current_length = 0
-            
-            particles = r'(では|には|から|まで|として|による|について|という|との|への|もの|こと|など|まま|ため)'
-            sub_parts = re.split(particles, sentence)
-            current_sub_part = []
-            current_sub_length = 0
-            
-            for part in sub_parts:
-                if not part.strip():
-                    continue
-                part_length = get_text_length(part)
-                if current_sub_length + part_length <= max_chunk_size:
-                    current_sub_part.append(part)
-                    current_sub_length += part_length
-                else:
-                    if current_sub_part:
-                        chunks.append(''.join(current_sub_part))
-                    current_sub_part = [part]
-                    current_sub_length = part_length
-            
-            if current_sub_part:
-                chunks.append(''.join(current_sub_part))
-            continue
+        sentence_length = len(sentence)
         
         if current_length + sentence_length > max_chunk_size:
-            chunks.append(' '.join(current_chunk))
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
             current_chunk = [sentence]
             current_length = sentence_length
         else:
@@ -222,42 +131,20 @@ def create_chunks(text, max_chunk_size=1024, min_chunk_size=256, max_chunks=3):
     
     return valid_chunks
 
-def summarize_chunk(chunk, index, total_chunks, start_time):
+def summarize_chunk(chunk, index, total_chunks):
     """Summarize chunk with Japanese language support"""
-    if not chunk.strip():
-        return ""
-        
     try:
-        if time.time() - start_time > 8:
-            raise TimeoutError(f"チャンク {index + 1} の処理がタイムアウトしました")
-        
-        model = get_summarizer()
-        if not model:
-            raise ValueError("サマライザーの初期化に失敗しました")
-        
-        # Fix the pipeline call to handle the output correctly
-        summary_output = model(
-            chunk,
-            max_length=100,
-            min_length=30,
-            num_beams=2,
-            early_stopping=True,
-            do_sample=False
+        model = get_model()
+        response = model.chat(
+            model="llama2-japanese",
+            messages=[
+                {"role": "system", "content": "あなたは要約を生成する日本語のAIアシスタントです。"},
+                {"role": "user", "content": f"以下の文章を要約してください：{chunk}"}
+            ]
         )
-        
-        if not summary_output or not isinstance(summary_output, list):
-            raise ValueError("無効な要約出力です")
-            
-        summary = summary_output[0].get('summary_text', '').strip()
-        if not summary:
-            raise ValueError("空の要約が生成されました")
-        
-        # Validate Japanese output
-        summary = validate_japanese_output(summary)
-        return summary
-        
+        return response['message']['content']
     except Exception as e:
-        logger.error(f"チャンク {index + 1} の要約に失敗: {str(e)}")
+        logger.error(f"Chunk {index + 1} summarization failed: {str(e)}")
         raise
 
 def summarize_text(text):
@@ -267,60 +154,27 @@ def summarize_text(text):
             raise ValueError("入力テキストが空です")
         
         update_progress(0, 100, "テキストを準備中...")
+        chunks = create_chunks(text, max_chunk_size=512, max_chunks=3)
+        total_chunks = len(chunks)
         
-        if len(text.strip()) < 10:
-            raise ValueError("テキストが短すぎます")
+        update_progress(0, total_chunks, "要約処理を開始します...")
+        summaries = []
         
-        start_time = time.time()
-        max_retries = 2
-        current_retry = 0
-        
-        while current_retry <= max_retries:
-            try:
-                max_chunk_size = 1024 >> current_retry
-                chunks = create_chunks(text, max_chunk_size=max_chunk_size)
-                total_chunks = len(chunks)
-                
-                if total_chunks == 0:
-                    raise ValueError("テキストを分割できませんでした")
-                
-                update_progress(0, total_chunks, "要約処理を開始します...")
-                summaries = []
-                chunk_start_time = time.time()
-                
-                for i, chunk in enumerate(chunks):
-                    if time.time() - start_time > 30:
-                        raise TimeoutError("要約処理の制限時間を超えました")
-                    
-                    if not chunk.strip():
-                        logger.warning(f"チャンク {i + 1} が空です。スキップします。")
-                        continue
-                    
-                    summary = summarize_chunk(chunk, i, total_chunks, chunk_start_time)
-                    if summary:
-                        summaries.append(summary)
-                    update_progress(i + 1, total_chunks, f"チャンク {i + 1}/{total_chunks} を処理中...")
-                    chunk_start_time = time.time()
-                
-                if summaries:
-                    final_summary = ' '.join(summaries)
-                    validate_japanese_output(final_summary)
-                    update_progress(total_chunks, total_chunks, "要約が完了しました")
-                    return final_summary
-                else:
-                    raise ValueError("要約を生成できませんでした")
-                    
-            except TimeoutError:
-                if current_retry == max_retries:
-                    raise
-                current_retry += 1
-                logger.warning(f"タイムアウトのため、より小さいチャンクサイズで再試行します ({current_retry}/{max_retries})")
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
                 continue
-            except Exception as e:
-                raise
                 
+            summary = summarize_chunk(chunk, i, total_chunks)
+            if summary:
+                summaries.append(summary)
+            update_progress(i + 1, total_chunks)
+        
+        if not summaries:
+            raise ValueError("要約を生成できませんでした")
+            
+        return ' '.join(summaries)
+        
     except Exception as e:
-        update_progress(0, 0, f"エラー: {str(e)}")
         logger.error(f"要約処理に失敗: {str(e)}")
         raise
 
@@ -330,21 +184,19 @@ def answer_question(question, context):
         raise ValueError("質問とコンテキストは空であってはいけません")
     
     try:
-        model = get_qa_model()
-        if not model:
-            raise ValueError("QAモデルの初期化に失敗しました")
-        
-        result = model(
-            question=question,
-            context=context,
-            max_answer_length=100,
-            handle_impossible_answer=True
+        model = get_model()
+        response = model.chat(
+            model="llama2-japanese",
+            messages=[
+                {"role": "system", "content": "あなたは質問に回答する日本語のAIアシスタントです。"},
+                {"role": "user", "content": f"以下のコンテキストに基づいて質問に答えてください:\nコンテキスト: {context}\n質問: {question}"}
+            ]
         )
         
-        if not result or not isinstance(result, dict) or 'answer' not in result:
+        if not response or 'message' not in response or 'content' not in response['message']:
             raise ValueError("無効な応答結果です")
         
-        return result['answer']
+        return response['message']['content']
         
     except Exception as e:
         logger.error(f"質問応答に失敗: {str(e)}")
