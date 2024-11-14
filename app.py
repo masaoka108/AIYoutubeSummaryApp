@@ -7,12 +7,16 @@ import threading
 import queue
 import time
 from models import db, Summary, Question
+from flask_migrate import Migrate  # Flask-Migrate をインポート
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev_key_123"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///youtube_summary.db"
 csrf = CSRFProtect(app)
 db.init_app(app)
+
+# Flask-Migrate を初期化
+migrate = Migrate(app, db)
 
 # Global queue for processing tasks
 processing_queue = queue.Queue()

@@ -1,0 +1,76 @@
+# Python関連のファイル
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+
+# Virtual environment ディレクトリ
+venv/
+env/
+.venv/
+
+# Jupyter Notebookのチェックポイント
+.ipynb_checkpoints
+
+# Flaskアプリのインスタンスフォルダと設定ファイル
+instance/
+config.py
+config.yaml
+.env
+
+# 環境構成ファイルやシークレットキーなどの機密情報
+*.env
+*.env.*
+
+# データベースファイル
+*.db
+*.sqlite3
+
+# 静的ファイルのビルドディレクトリ
+staticfiles/
+
+# テンポラリファイル
+*.bak
+*.swp
+
+# OS固有の不要ファイル
+.DS_Store
+Thumbs.db
+
+# エディタ固有のファイル
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# パッケージマネージャのファイル
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ログファイル
+*.log
+
+# Coverageテスト結果
+htmlcov/
+.coverage
+.coverage.*
+.cache
+
+# PyInstaller
+# 生成されるバイナリやビルドファイルを無視
+dist/
+build/
+
+# MyPyなどの型チェックツールのキャッシュ
+.mypy_cache/
+.dmypy.json
+.cache
+
+# pytestキャッシュ
+.pytest_cache/
+
+# VSCode設定（プロジェクト設定用）
+.vscode/settings.json
+
+migrations/
