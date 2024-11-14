@@ -11,7 +11,8 @@ body {
 }
 
 main {
-    flex: 1;
+    flex: 1 0 auto;
+    padding: 2rem 0;
 }
 
 .btn-primary {
@@ -112,10 +113,12 @@ main {
 
 /* Footer styles */
 footer {
-    margin-top: auto;
+    flex-shrink: 0;
+    width: 100%;
     background-color: #343a40;
     color: #fff;
     padding: 2rem 0;
+    margin-top: auto;
 }
 
 footer h5 {
